@@ -207,10 +207,15 @@ def _run_pipeline(subject_id: int, selected_hadm_ids: list, user_intent: str):
 def _render_results(result: dict):
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
-    diag = result.get("diagnoses_output") or {}
-    summary = diag.get("summary") or "Concise summary unavailable."
-    score = diag.get("patient_score") or 3
+    diag       = result.get("diagnoses_output") or {}
+    evaluation = result.get("evaluator_output") or {}
+    summary    = diag.get("summary") or "Concise summary unavailable."
+    score      = diag.get("patient_score") or 3
     final_diagnosis = diag.get("final_diagnosis") or "Indeterminate."
+
+    # ── Evaluator flag (green / yellow / red) — shown FIRST ──────────────
+    if evaluation:
+        _render_evaluator_flag(evaluation)
 
     st.markdown("### Final Result")
 
@@ -241,13 +246,51 @@ def _render_results(result: dict):
         )
 
     if diag.get("details"):
-        with st.expander("Diagnostic details"):
+        with st.expander("Diagnostic details (SOFA / SEP-1 breakdown)"):
             st.markdown(diag["details"])
+
+    # ── Treatment recommendations ─────────────────────────────────────────
+    next_steps           = (diag.get("next_steps") or "").strip()
+    short_term_treatment = (diag.get("short_term_treatment") or "").strip()
+    mid_term_plan        = (diag.get("mid_term_plan") or "").strip()
+
+    if next_steps or short_term_treatment or mid_term_plan:
+        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+        st.markdown("### Treatment Recommendations")
+
+        tx_tabs = st.tabs([
+            "⚡  Immediate (0–6 h)",
+            "🏥  Short-term (6–72 h)",
+            "📅  Mid-term (Day 3–30)",
+        ])
+
+        with tx_tabs[0]:
+            if next_steps:
+                st.markdown(next_steps)
+            else:
+                st.caption("No immediate actions recorded.")
+
+        with tx_tabs[1]:
+            if short_term_treatment:
+                st.markdown(short_term_treatment)
+            else:
+                st.caption("No short-term plan recorded.")
+
+        with tx_tabs[2]:
+            if mid_term_plan:
+                st.markdown(mid_term_plan)
+            else:
+                st.caption("No mid-term plan recorded.")
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
     st.markdown("### Streamlined agent trace (Part 1 only)")
     _render_orchestrator_decision(result.get("orchestrator_decision") or {})
     _render_part1_trace(result, diag.get("agent_trace_part1") or [])
+
+    # ── Evaluator full report ────────────────────────────────────────────
+    if evaluation:
+        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+        _render_evaluator_report(evaluation)
 
 
 def _render_orchestrator_decision(decision: dict):
@@ -332,6 +375,93 @@ def _render_part1_trace(result: dict, fallback_trace: list):
         "Part 2 (detailed reasoning) is intentionally hidden in this view to "
         "save context. Open it from the **Patient History** tab."
     )
+
+
+# ── Evaluator rendering ─────────────────────────────────────────────────────
+
+_FLAG_PALETTE = {
+    "green":  ("#059669", "✅", "Task executed successfully"),
+    "yellow": ("#D97706", "⚠️", "Task executed with caveats"),
+    "red":    ("#DC2626", "🛑", "Task could not be executed reliably"),
+}
+
+_VERDICT_COLORS = {
+    "ok":   "#059669",
+    "warn": "#D97706",
+    "fail": "#DC2626",
+}
+
+
+def _render_evaluator_flag(evaluation: dict):
+    flag = (evaluation.get("flag") or "yellow").lower()
+    color, emoji, headline = _FLAG_PALETTE.get(flag, _FLAG_PALETTE["yellow"])
+    overall = evaluation.get("overall_summary") or ""
+    confidence = evaluation.get("confidence", 0)
+
+    st.markdown(
+        f"<div style='background:linear-gradient(135deg,{color}E6,{color});"
+        f"color:white;padding:1rem 1.25rem;border-radius:14px;"
+        f"margin-bottom:1rem;display:flex;align-items:center;gap:1rem;"
+        f"box-shadow:0 6px 20px {color}55;'>"
+        f"<div style='font-size:2rem;line-height:1;'>{emoji}</div>"
+        f"<div style='flex:1;'>"
+        f"<div style='font-size:0.72rem;font-weight:600;opacity:0.85;"
+        f"letter-spacing:0.08em;'>EVALUATOR VERDICT</div>"
+        f"<div style='font-size:1.05rem;font-weight:700;line-height:1.3;'>"
+        f"{headline}</div>"
+        f"<div style='font-size:0.88rem;opacity:0.92;margin-top:0.25rem;'>"
+        f"{_html_escape(overall)}</div>"
+        f"</div>"
+        f"<div style='background:rgba(255,255,255,0.2);border-radius:10px;"
+        f"padding:0.5rem 0.85rem;text-align:center;min-width:78px;'>"
+        f"<div style='font-size:0.65rem;opacity:0.85;'>CONFIDENCE</div>"
+        f"<div style='font-size:1.5rem;font-weight:800;line-height:1;'>"
+        f"{confidence}%</div></div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_evaluator_report(evaluation: dict):
+    st.markdown("### Evaluator Report")
+    reports = evaluation.get("agent_reports") or {}
+    canonical = (
+        "orchestrator", "history", "vitals", "lab",
+        "microbiology", "pharmacy", "diagnoses",
+    )
+
+    cols = st.columns(min(4, max(1, len(canonical))))
+    for i, name in enumerate(canonical):
+        entry = reports.get(name) or {}
+        verdict = (entry.get("verdict") or "warn").lower()
+        notes = entry.get("notes") or ""
+        color = _VERDICT_COLORS.get(verdict, "#64748B")
+        with cols[i % len(cols)]:
+            st.markdown(
+                f"<div style='background:#FFFFFF;border:1px solid #D0DEFA;"
+                f"border-left:4px solid {color};border-radius:10px;"
+                f"padding:0.65rem 0.85rem;margin-bottom:0.5rem;'>"
+                f"<div style='font-weight:700;color:#1A2C50;font-size:0.9rem;'>"
+                f"{name}</div>"
+                f"<div style='font-size:0.72rem;font-weight:700;"
+                f"color:{color};letter-spacing:0.06em;text-transform:uppercase;"
+                f"margin:0.15rem 0 0.3rem 0;'>{verdict}</div>"
+                f"<div style='font-size:0.82rem;color:#3D5A8A;line-height:1.4;'>"
+                f"{_html_escape(notes)}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+    missing = evaluation.get("missing_data") or []
+    if missing:
+        with st.expander("Missing or ambiguous data flagged by Evaluator"):
+            for item in missing:
+                st.markdown(f"- {item}")
+
+    recs = evaluation.get("improvement_recommendations") or ""
+    if recs and recs.strip() and recs.strip().startswith("_") is False:
+        with st.expander("Improvement recommendations", expanded=False):
+            st.markdown(recs)
 
 
 # ── Tiny utilities ──────────────────────────────────────────────────────────

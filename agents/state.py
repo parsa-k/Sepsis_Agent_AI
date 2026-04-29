@@ -124,13 +124,35 @@ class SepsisState(TypedDict, total=False):
     diagnoses_output: dict
     """
     {
-        "summary":      str,    # concise sepsis summary (intro line)
-        "patient_score": int,   # 1 (Good) … 5 (Critical)
-        "final_diagnosis": str, # one-line verdict
-        "details":      str,    # supporting paragraph(s)
+        "summary":              str,
+        "patient_score":        int,    # 1 (Good) … 5 (Critical)
+        "final_diagnosis":      str,
+        "details":              str,
+        "sepsis3_met":          bool|None,
+        "sep1_compliant":       bool|None,
+        "next_steps":           str,    # 0–6 h actions (Markdown)
+        "short_term_treatment": str,    # 6–72 h plan (Markdown)
+        "mid_term_plan":        str,    # day 3–30 plan (Markdown)
         "agent_trace_part1": [
             {"agent": str, "part1_payload": dict}, ...
         ]
+    }
+    """
+
+    # ── Evaluator Agent output (final quality gate) ──────────────────────
+    evaluator_output: dict
+    """
+    {
+        "flag":               "green" | "yellow" | "red",
+        "task_executed":      bool,
+        "confidence":         int,            # 0..100
+        "overall_summary":    str,
+        "agent_reports": {
+            "<agent_name>": {"verdict": "ok|warn|fail", "notes": str},
+            ...
+        },
+        "missing_data":       list[str],
+        "improvement_recommendations": str   # Markdown
     }
     """
 

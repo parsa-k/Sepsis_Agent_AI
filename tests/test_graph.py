@@ -143,16 +143,25 @@ class TestGraphFlow(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _llm(self, multi_visit: bool):
-        active = ["vitals", "lab", "microbiology", "pharmacy"]
-        if multi_visit:
-            active = ["history"] + active
-        orchestrator_resp = json.dumps({
+        feature_active = ["vitals", "lab", "microbiology", "pharmacy"]
+
+        # Phase 1 — pre-plan
+        preplan_resp = json.dumps({
             "role": "Sepsis-3 + SEP-1 audit",
             "multi_visit": multi_visit,
             "history_first": multi_visit,
-            "active_agents": active,
-            "agent_instructions": {a: f"focus on {a}" for a in active},
-            "rationale": "Standard plan.",
+            "agent_instructions": (
+                {"history": "Extract baseline organ function and chronic burden."}
+                if multi_visit else {}
+            ),
+            "rationale": "Phase-1 gating.",
+        })
+        # Phase 2 — re-plan
+        replan_resp = json.dumps({
+            "role": "Refined audit",
+            "active_agents": feature_active,
+            "agent_instructions": {a: f"focus on {a}" for a in feature_active},
+            "rationale": "Phase-2 picks.",
         })
         diagnoses_resp = json.dumps({
             "summary": "Likely sepsis.",
@@ -161,6 +170,26 @@ class TestGraphFlow(unittest.TestCase):
             "details": "SOFA 5, lactate 3.0",
             "sepsis3_met": True,
             "sep1_compliant": False,
+            "next_steps": "- Repeat lactate.",
+            "short_term_treatment": "Broad-spectrum AB x 7 days.",
+            "mid_term_plan": "Outpatient follow-up day 14.",
+        })
+        evaluator_resp = json.dumps({
+            "flag": "green",
+            "task_executed": True,
+            "confidence": 88,
+            "overall_summary": "Pipeline executed cleanly.",
+            "agent_reports": {
+                "orchestrator": {"verdict": "ok", "notes": "Plan was clear."},
+                "history":      {"verdict": "ok", "notes": "Skipped or ran appropriately."},
+                "vitals":       {"verdict": "ok", "notes": "HR captured."},
+                "lab":          {"verdict": "ok", "notes": "Lactate captured."},
+                "microbiology": {"verdict": "ok", "notes": "No evidence."},
+                "pharmacy":     {"verdict": "ok", "notes": "Antibiotic on file."},
+                "diagnoses":    {"verdict": "ok", "notes": "Verdict consistent."},
+            },
+            "missing_data": [],
+            "improvement_recommendations": "_None._",
         })
         return RoutedFakeLLM({
             "Vital Signs Specialist": two_part_envelope({"hr_latest": 110}),
@@ -169,7 +198,13 @@ class TestGraphFlow(unittest.TestCase):
             "Pharmacy & Fluid-Management Specialist": two_part_envelope({"first_antibiotic_time": "11:00"}),
             "Clinical History Analyst": two_part_envelope({"chronic_conditions": ["CKD"]}),
             "**Diagnoses Agent**": diagnoses_resp,
-            "**Orchestrator**": orchestrator_resp,
+            "**Evaluator Agent**": evaluator_resp,
+            # Phase-2 must be matched BEFORE Phase-1 because the substring
+            # "Orchestrator" appears in both prompts; dict iteration is
+            # insertion-ordered in Py3.7+ and the routed mock returns the
+            # first key found in the system message.
+            "Orchestrator (Phase 2 — re-plan)": replan_resp,
+            "Orchestrator (Phase 1 — pre-plan)": preplan_resp,
         })
 
     def test_single_visit_skips_history(self):
@@ -233,7 +268,42 @@ class TestGraphFlow(unittest.TestCase):
             summary = json.load(f)
         self.assertIn("vitals", summary["agent_outputs"])
         self.assertIn("diagnoses", summary["agent_outputs"])
+        self.assertIn("evaluator", summary["agent_outputs"])
         self.assertIn("final_state", summary)
+
+    def test_pipeline_emits_evaluator_flag(self):
+        """Pipeline must produce evaluator_output with a valid flag."""
+        llm = self._llm(multi_visit=False)
+        mm = MemoryManager(patient_id="99", base_dir=self.tmp)
+        with self._apply_patches():
+            result = run_pipeline(
+                llm=llm, subject_id=99, selected_hadm_ids=[101],
+                user_intent="audit", memory_manager=mm,
+            )
+        ev = result.get("evaluator_output") or {}
+        self.assertIn(ev.get("flag"), {"green", "yellow", "red"})
+        self.assertIsInstance(ev.get("agent_reports"), dict)
+        self.assertIn("vitals", ev["agent_reports"])
+        self.assertIn("diagnoses", ev["agent_reports"])
+
+    def test_replan_runs_after_history_in_multi_visit(self):
+        """After history Phase-2 must run and pick feature agents."""
+        llm = self._llm(multi_visit=True)
+        mm = MemoryManager(patient_id="99", base_dir=self.tmp)
+        with self._apply_patches():
+            result = run_pipeline(
+                llm=llm, subject_id=99, selected_hadm_ids=[101, 102],
+                user_intent="multi visit audit", memory_manager=mm,
+            )
+        decision = result.get("orchestrator_decision") or {}
+        # Phase-2 fills active_agents with feature agents.
+        self.assertIn("vitals", decision.get("active_agents", []))
+        self.assertIn("lab",    decision.get("active_agents", []))
+        # Phase-2 should produce a `replan` trace entry.
+        kinds = {e.get("kind") for e in (result.get("agent_trace") or [])
+                 if e.get("agent") == "Orchestrator"}
+        self.assertIn("preplan", kinds)
+        self.assertIn("replan",  kinds)
 
     # ── helper ─────────────────────────────────────────────────────────────
 

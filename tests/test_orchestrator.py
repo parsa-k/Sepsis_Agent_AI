@@ -1,4 +1,4 @@
-"""Tests for the dynamic Orchestrator: rule enforcement, parsing, routing."""
+"""Tests for the two-phase dynamic Orchestrator and helpers."""
 
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ from types import SimpleNamespace
 
 from agents.memory_manager_agent import MemoryManager
 from agents.orchestrator_agent import (
-    run_orchestrator,
+    run_orchestrator_preplan,
+    run_orchestrator_replan,
     needs_history_first,
     propagate_history_baseline,
     _enforce_rules,
@@ -129,35 +130,135 @@ class TestRunOrchestrator(unittest.TestCase):
             "user_intent": "Audit sepsis & SEP-1",
         }
 
-    def test_single_visit_excludes_history(self):
+    # ── Phase 1 — pre-plan ─────────────────────────────────────────────────
+
+    def test_preplan_single_visit_excludes_history(self):
         canned = json.dumps({
             "role": "Sepsis-3 audit",
             "multi_visit": False, "history_first": False,
-            "active_agents": ["vitals", "lab", "pharmacy"],
-            "agent_instructions": {"vitals": "v", "lab": "l", "pharmacy": "p"},
+            "agent_instructions": {},
+            "rationale": "single visit",
         })
         llm = FakeLLM(canned)
-        out = run_orchestrator(self._state(multi=False), llm, memory_manager=self.mm)
+        out = run_orchestrator_preplan(self._state(multi=False), llm, memory_manager=self.mm)
         decision = out["orchestrator_decision"]
-        self.assertNotIn("history", decision["active_agents"])
         self.assertFalse(decision["history_first"])
-        self.assertEqual(needs_history_first({"orchestrator_decision": decision}), "vitals")
+        self.assertNotIn("history", decision.get("agent_instructions", {}))
+        self.assertEqual(
+            needs_history_first({"orchestrator_decision": decision}),
+            "replan",
+        )
 
-    def test_multi_visit_forces_history_first(self):
+    def test_preplan_multi_visit_sets_history_first_with_instruction(self):
         canned = json.dumps({
-            "role": "Multi-visit audit",
-            "active_agents": ["history", "vitals", "lab", "pharmacy"],
+            "role": "Multi-visit baseline-aware audit",
             "history_first": True,
             "agent_instructions": {
-                "history": "h", "vitals": "v", "lab": "l", "pharmacy": "p",
+                "history": "Surface CKD trajectory and dialysis dependency.",
             },
+            "rationale": "two visits selected",
         })
         llm = FakeLLM(canned)
-        out = run_orchestrator(self._state(multi=True), llm, memory_manager=self.mm)
+        out = run_orchestrator_preplan(self._state(multi=True), llm, memory_manager=self.mm)
         decision = out["orchestrator_decision"]
-        self.assertEqual(decision["active_agents"][0], "history")
         self.assertTrue(decision["history_first"])
-        self.assertEqual(needs_history_first({"orchestrator_decision": decision}), "history")
+        self.assertIn("history", decision["agent_instructions"])
+        self.assertIn("CKD", decision["agent_instructions"]["history"])
+        self.assertEqual(
+            needs_history_first({"orchestrator_decision": decision}),
+            "history",
+        )
+        # Phase 1 leaves active_agents empty — Phase 2 fills it.
+        self.assertEqual(decision["active_agents"], [])
+
+    def test_preplan_recovers_when_llm_returns_garbage(self):
+        """Garbage in → still emits a usable Phase-1 envelope."""
+        llm = FakeLLM("totally not json")
+        out = run_orchestrator_preplan(
+            self._state(multi=True), llm, memory_manager=self.mm,
+        )
+        decision = out["orchestrator_decision"]
+        self.assertTrue(decision["history_first"])
+        self.assertIn("history", decision["agent_instructions"])
+
+    def test_preplan_single_visit_garbage_keeps_history_skipped(self):
+        llm = FakeLLM("not json at all")
+        out = run_orchestrator_preplan(
+            self._state(multi=False), llm, memory_manager=self.mm,
+        )
+        decision = out["orchestrator_decision"]
+        self.assertFalse(decision["history_first"])
+        self.assertNotIn("history", decision["agent_instructions"])
+
+    # ── Phase 2 — re-plan ──────────────────────────────────────────────────
+
+    def test_replan_picks_features_from_baseline_and_data_flags(self):
+        canned = json.dumps({
+            "role": "Refined sepsis audit",
+            "active_agents": ["vitals", "lab"],
+            "agent_instructions": {
+                "vitals": "Track MAP delta vs baseline.",
+                "lab":    "Compare lactate & creatinine to CKD baseline.",
+            },
+            "rationale": "Baseline-aware picks",
+        })
+        llm = FakeLLM(canned)
+        state = self._state(multi=True)
+        # Phase 1 already ran — set its decision + history baseline.
+        state["orchestrator_decision"] = {
+            "role": "Multi-visit audit",
+            "history_first": True,
+            "agent_instructions": {"history": "h"},
+            "user_intent": state["user_intent"],
+        }
+        state["history_baseline"] = {
+            "actionable": {"baseline_creatinine": 2.4},
+            "source_records": ["d.icd_code N18.6"],
+        }
+        out = run_orchestrator_replan(state, llm, memory_manager=self.mm)
+        decision = out["orchestrator_decision"]
+        # Replan must NOT include history in feature selection logic, but
+        # we keep "history" at the head of active_agents for traceability.
+        self.assertEqual(decision["active_agents"][0], "history")
+        self.assertIn("vitals", decision["active_agents"])
+        self.assertIn("lab",    decision["active_agents"])
+        # Phase-2 feature instructions override the canned LLM ones.
+        self.assertIn("MAP",          decision["agent_instructions"]["vitals"])
+        self.assertIn("lactate",      decision["agent_instructions"]["lab"].lower())
+        # History instruction from Phase-1 is preserved.
+        self.assertEqual(decision["agent_instructions"]["history"], "h")
+
+    def test_replan_single_visit_does_not_include_history(self):
+        canned = json.dumps({
+            "active_agents": ["vitals"],
+            "agent_instructions": {"vitals": "v"},
+        })
+        llm = FakeLLM(canned)
+        state = self._state(multi=False)
+        state["orchestrator_decision"] = {
+            "role": "Single audit",
+            "history_first": False,
+            "agent_instructions": {},
+            "user_intent": state["user_intent"],
+        }
+        out = run_orchestrator_replan(state, llm, memory_manager=self.mm)
+        decision = out["orchestrator_decision"]
+        self.assertNotIn("history", decision["active_agents"])
+        self.assertGreaterEqual(len(decision["active_agents"]), 1)
+
+    def test_replan_recovers_when_llm_returns_garbage(self):
+        llm = FakeLLM("nope")
+        state = self._state(multi=False)
+        state["orchestrator_decision"] = {
+            "role": "Single audit", "history_first": False,
+            "agent_instructions": {}, "user_intent": state["user_intent"],
+        }
+        out = run_orchestrator_replan(state, llm, memory_manager=self.mm)
+        decision = out["orchestrator_decision"]
+        self.assertGreaterEqual(len(decision["active_agents"]), 1)
+        self.assertNotIn("history", decision["active_agents"])
+
+    # ── propagate baseline ────────────────────────────────────────────────
 
     def test_propagate_history_baseline_copies_part1(self):
         state = {
@@ -175,13 +276,6 @@ class TestRunOrchestrator(unittest.TestCase):
         self.assertEqual(
             baseline["actionable"], {"chronic_conditions": ["CKD"]},
         )
-
-    def test_recovers_when_llm_returns_garbage(self):
-        llm = FakeLLM("totally not json")
-        out = run_orchestrator(self._state(multi=False), llm, memory_manager=self.mm)
-        decision = out["orchestrator_decision"]
-        self.assertIn("active_agents", decision)
-        self.assertGreaterEqual(len(decision["active_agents"]), 1)
 
 
 if __name__ == "__main__":

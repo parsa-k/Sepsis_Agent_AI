@@ -1,20 +1,37 @@
 """
-LangGraph wiring for the refactored Sepsis Diagnostic system.
+LangGraph wiring for the two-phase Sepsis Diagnostic system.
 
 Flow
 ----
 ```
 data_loader
-    └─► orchestrator
-            ├─► (multi-visit) ─► history ─► propagate_baseline ─► vitals ─► lab ─► microbiology ─► pharmacy ─► diagnoses ─► END
-            └─► (single visit) ──────────────────────────────────► vitals ─► lab ─► microbiology ─► pharmacy ─► diagnoses ─► END
+    └─► orchestrator_preplan
+            ├─► (multi-visit) ─► history ─► propagate_baseline ─► orchestrator_replan
+            └─► (single visit) ───────────────────────────────► orchestrator_replan
+                                              │
+                                              ▼
+            vitals ─► lab ─► microbiology ─► pharmacy
+                                              │
+                                              ▼
+                                      diagnoses ─► evaluator ─► END
 ```
 
-* Each feature node is a no-op when ``orchestrator_decision.active_agents``
-  does not include it (handled inside the agent's helper).
-* The Memory Manager is constructed once per ``run_pipeline`` call and
-  injected into every agent via closure — agents never write directly to
-  disk, only the manager does.
+* Phase-1 Orchestrator (`orchestrator_preplan`) decides whether History
+  must run first and crafts a tailored History-Agent instruction.
+* The History Agent (multi-visit only) produces a Part-1 baseline, which
+  `propagate_baseline` copies to `state['history_baseline']`.
+* Phase-2 Orchestrator (`orchestrator_replan`) reads the baseline and the
+  user intent, then finalises which feature agents to activate and
+  writes their per-agent instructions.
+* Feature agents read their dynamic instruction + baseline before
+  emitting their two-part outputs.
+* The Diagnoses Agent reads only Part-1 payloads.
+* The Evaluator Agent gives a final green/yellow/red verdict on the run.
+
+Each feature node is a no-op when ``orchestrator_decision.active_agents``
+does not include it (handled inside `_agent_utils.run_feature_agent`).
+The Memory Manager is constructed once per ``run_pipeline`` call and
+injected into every agent via closure.
 """
 
 from __future__ import annotations
@@ -26,7 +43,8 @@ from langgraph.graph import StateGraph, END
 from agents.state import SepsisState
 from agents.memory_manager_agent import MemoryManager
 from agents.orchestrator_agent import (
-    run_orchestrator,
+    run_orchestrator_preplan,
+    run_orchestrator_replan,
     needs_history_first,
     propagate_history_baseline,
 )
@@ -36,6 +54,7 @@ from agents.lab_agent import run_lab_agent
 from agents.microbiology_agent import run_microbiology_agent
 from agents.pharmacy_agent import run_pharmacy_agent
 from agents.diagnoses_agent import run_diagnoses_agent
+from agents.evaluator_agent import run_evaluator_agent
 
 import db
 
@@ -159,8 +178,8 @@ def build_graph(
 
     graph.add_node("data_loader", make_data_loader(memory_manager))
     graph.add_node(
-        "orchestrator",
-        _make_node(run_orchestrator, llm, memory_manager,
+        "orchestrator_preplan",
+        _make_node(run_orchestrator_preplan, llm, memory_manager,
                    "orchestrator", custom_prompts),
     )
     graph.add_node(
@@ -169,6 +188,11 @@ def build_graph(
                    "history", custom_prompts),
     )
     graph.add_node("propagate_baseline", propagate_history_baseline)
+    graph.add_node(
+        "orchestrator_replan",
+        _make_node(run_orchestrator_replan, llm, memory_manager,
+                   "orchestrator_replan", custom_prompts),
+    )
     graph.add_node(
         "vitals",
         _make_node(run_vitals_agent, llm, memory_manager,
@@ -194,23 +218,32 @@ def build_graph(
         _make_node(run_diagnoses_agent, llm, memory_manager,
                    "diagnoses", custom_prompts),
     )
+    graph.add_node(
+        "evaluator",
+        _make_node(run_evaluator_agent, llm, memory_manager,
+                   "evaluator", custom_prompts),
+    )
 
     graph.set_entry_point("data_loader")
-    graph.add_edge("data_loader", "orchestrator")
+    graph.add_edge("data_loader", "orchestrator_preplan")
 
+    # Phase-1 → (history?) → Phase-2
     graph.add_conditional_edges(
-        "orchestrator",
+        "orchestrator_preplan",
         needs_history_first,
-        {"history": "history", "vitals": "vitals"},
+        {"history": "history", "replan": "orchestrator_replan"},
     )
     graph.add_edge("history", "propagate_baseline")
-    graph.add_edge("propagate_baseline", "vitals")
+    graph.add_edge("propagate_baseline", "orchestrator_replan")
 
+    # Phase-2 → feature agents (sequential, gated by active_agents)
+    graph.add_edge("orchestrator_replan", "vitals")
     graph.add_edge("vitals", "lab")
     graph.add_edge("lab", "microbiology")
     graph.add_edge("microbiology", "pharmacy")
     graph.add_edge("pharmacy", "diagnoses")
-    graph.add_edge("diagnoses", END)
+    graph.add_edge("diagnoses", "evaluator")
+    graph.add_edge("evaluator", END)
 
     return graph.compile()
 

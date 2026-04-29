@@ -26,7 +26,7 @@ MEMORY_DIR = "app_memory"
 
 _AGENT_ORDER = (
     "orchestrator", "history", "vitals", "lab",
-    "microbiology", "pharmacy", "diagnoses",
+    "microbiology", "pharmacy", "diagnoses", "evaluator",
 )
 
 _AGENT_ICONS = {
@@ -37,6 +37,19 @@ _AGENT_ICONS = {
     "microbiology": "🦠",
     "pharmacy":     "💊",
     "diagnoses":    "🩻",
+    "evaluator":    "✅",
+}
+
+_FLAG_PALETTE = {
+    "green":  ("#059669", "✅", "Task executed successfully"),
+    "yellow": ("#D97706", "⚠️", "Task executed with caveats"),
+    "red":    ("#DC2626", "🛑", "Task could not be executed reliably"),
+}
+
+_VERDICT_COLORS = {
+    "ok":   "#059669",
+    "warn": "#D97706",
+    "fail": "#DC2626",
 }
 
 _SCORE_PALETTE = {
@@ -192,13 +205,20 @@ def _render_banner(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _tab_summary(session: dict, final_state: dict):
-    diag = final_state.get("diagnoses_output") or {}
-    decision = final_state.get("orchestrator_decision") or {}
-    selected = final_state.get("selected_hadm_ids") or []
+    diag        = final_state.get("diagnoses_output") or {}
+    evaluation  = final_state.get("evaluator_output") or _outcome_from_summary(
+        session, "evaluator",
+    )
+    decision    = final_state.get("orchestrator_decision") or {}
+    selected    = final_state.get("selected_hadm_ids") or []
     user_intent = final_state.get("user_intent") or "(none)"
 
     score = max(1, min(5, _to_int(diag.get("patient_score")) or 3))
     color, slabel = _SCORE_PALETTE.get(score, ("#888", "—"))
+
+    # ── Evaluator flag (top) ─────────────────────────────────────────────
+    if evaluation:
+        _render_evaluator_flag(evaluation)
 
     # ── run summary cards ────────────────────────────────────────────────
     st.markdown("#### Run Summary")
@@ -303,6 +323,25 @@ def _tab_summary(session: dict, final_state: dict):
         with st.expander("Full diagnostic details from Diagnoses Agent", expanded=True):
             st.markdown(diag["details"])
 
+    # ── treatment recommendations ─────────────────────────────────────────
+    next_steps           = (diag.get("next_steps") or "").strip()
+    short_term_treatment = (diag.get("short_term_treatment") or "").strip()
+    mid_term_plan        = (diag.get("mid_term_plan") or "").strip()
+
+    if next_steps or short_term_treatment or mid_term_plan:
+        st.markdown("#### Treatment Recommendations")
+        tx_tabs = st.tabs([
+            "⚡  Immediate (0–6 h)",
+            "🏥  Short-term (6–72 h)",
+            "📅  Mid-term (Day 3–30)",
+        ])
+        with tx_tabs[0]:
+            st.markdown(next_steps) if next_steps else st.caption("Not recorded.")
+        with tx_tabs[1]:
+            st.markdown(short_term_treatment) if short_term_treatment else st.caption("Not recorded.")
+        with tx_tabs[2]:
+            st.markdown(mid_term_plan) if mid_term_plan else st.caption("Not recorded.")
+
     # ── orchestrator role / rationale ─────────────────────────────────────
     if decision.get("role") or decision.get("rationale"):
         st.markdown("#### Orchestrator Plan")
@@ -323,6 +362,90 @@ def _tab_summary(session: dict, final_state: dict):
         if decision.get("rationale"):
             with st.expander("Orchestrator rationale"):
                 st.markdown(decision["rationale"])
+
+    # ── evaluator full report ─────────────────────────────────────────────
+    if evaluation:
+        st.markdown("#### Evaluator Report")
+        _render_evaluator_report(evaluation)
+
+
+# ── Evaluator helpers (shared by Summary tab + Agents Report tab) ───────────
+
+def _render_evaluator_flag(evaluation: dict):
+    flag = (evaluation.get("flag") or "yellow").lower()
+    color, emoji, headline = _FLAG_PALETTE.get(flag, _FLAG_PALETTE["yellow"])
+    overall    = evaluation.get("overall_summary") or ""
+    confidence = evaluation.get("confidence", 0)
+
+    st.markdown(
+        f"<div style='background:linear-gradient(135deg,{color}E6,{color});"
+        f"color:white;padding:1rem 1.25rem;border-radius:14px;"
+        f"margin-bottom:1rem;display:flex;align-items:center;gap:1rem;"
+        f"box-shadow:0 6px 20px {color}55;'>"
+        f"<div style='font-size:2rem;line-height:1;'>{emoji}</div>"
+        f"<div style='flex:1;'>"
+        f"<div style='font-size:0.72rem;font-weight:600;opacity:0.85;"
+        f"letter-spacing:0.08em;'>EVALUATOR VERDICT</div>"
+        f"<div style='font-size:1.05rem;font-weight:700;line-height:1.3;'>"
+        f"{headline}</div>"
+        f"<div style='font-size:0.88rem;opacity:0.92;margin-top:0.25rem;'>"
+        f"{_he(overall)}</div>"
+        f"</div>"
+        f"<div style='background:rgba(255,255,255,0.2);border-radius:10px;"
+        f"padding:0.5rem 0.85rem;text-align:center;min-width:78px;'>"
+        f"<div style='font-size:0.65rem;opacity:0.85;'>CONFIDENCE</div>"
+        f"<div style='font-size:1.5rem;font-weight:800;line-height:1;'>"
+        f"{confidence}%</div></div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_evaluator_report(evaluation: dict):
+    reports = evaluation.get("agent_reports") or {}
+    canonical = (
+        "orchestrator", "history", "vitals", "lab",
+        "microbiology", "pharmacy", "diagnoses",
+    )
+
+    cols = st.columns(min(4, max(1, len(canonical))))
+    for i, name in enumerate(canonical):
+        entry   = reports.get(name) or {}
+        verdict = (entry.get("verdict") or "warn").lower()
+        notes   = entry.get("notes") or ""
+        color   = _VERDICT_COLORS.get(verdict, "#64748B")
+        with cols[i % len(cols)]:
+            st.markdown(
+                f"<div style='background:#FFFFFF;border:1px solid #D0DEFA;"
+                f"border-left:4px solid {color};border-radius:10px;"
+                f"padding:0.65rem 0.85rem;margin-bottom:0.5rem;'>"
+                f"<div style='font-weight:700;color:#1A2C50;font-size:0.9rem;'>"
+                f"{name}</div>"
+                f"<div style='font-size:0.72rem;font-weight:700;color:{color};"
+                f"letter-spacing:0.06em;text-transform:uppercase;"
+                f"margin:0.15rem 0 0.3rem 0;'>{verdict}</div>"
+                f"<div style='font-size:0.82rem;color:#3D5A8A;line-height:1.4;'>"
+                f"{_he(notes)}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+    missing = evaluation.get("missing_data") or []
+    if missing:
+        with st.expander("Missing or ambiguous data flagged by Evaluator"):
+            for item in missing:
+                st.markdown(f"- {item}")
+
+    recs = evaluation.get("improvement_recommendations") or ""
+    if recs.strip() and not recs.strip().startswith("_"):
+        with st.expander("Improvement recommendations", expanded=False):
+            st.markdown(recs)
+
+
+def _outcome_from_summary(session: dict, agent_name: str) -> dict:
+    """Pull a non-two-part outcome (e.g. evaluator) from agent_outputs."""
+    record = (session.get("agent_outputs") or {}).get(agent_name) or {}
+    return record.get("outcome") or {}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -638,8 +761,15 @@ def _render_agent_card(agent_name: str, payload: dict):
 
         if is_outcome_style:
             outcome = payload.get("outcome") or {}
-            st.markdown("**Outcome**")
-            st.json(outcome)
+
+            # Special-case: evaluator gets a rich rendering
+            if agent_name == "evaluator" and outcome:
+                _render_evaluator_flag(outcome)
+                _render_evaluator_report(outcome)
+            else:
+                st.markdown("**Outcome**")
+                st.json(outcome)
+
             if payload.get("raw"):
                 with st.expander("Raw LLM response"):
                     st.code(payload["raw"], language="text")

@@ -45,6 +45,11 @@ activated. You MUST NOT speculate beyond those payloads.
    bundle) using timing and dosing facts already distilled.
 3. Produce a **Patient State Score** between **1 (Good)** and **5
    (Critical)** based on the worst signals across all payloads.
+4. Recommend **immediate next steps** (actions within the next 1–6 hours)
+   and a **short-term treatment plan** (hours 6–72, during the acute
+   admission) and a **mid-term plan** (post-acute / discharge planning,
+   days 3–30). Ground every recommendation in the evidence present in the
+   Part-1 payloads — do not invent data.
 
 ### Score rubric
 | Score | Label      | Meaning                                              |
@@ -55,15 +60,32 @@ activated. You MUST NOT speculate beyond those payloads.
 | 4     | Severe     | Sepsis-3 met OR multiple organ dysfunction           |
 | 5     | Critical   | Septic shock or vasopressor-dependent + lactate ≥ 4  |
 
+### Treatment field guidance
+* `next_steps` — bulleted list of urgent actions: blood cultures if not
+  drawn, empiric antibiotic escalation/de-escalation, fluid resuscitation
+  status, vasopressor titration, repeat lactate, consults needed (ID,
+  nephrology, etc.), monitoring orders.
+* `short_term_treatment` — structured Markdown covering: antibiotic
+  plan (agent, dose, duration target), fluid balance targets, organ
+  support (ventilator, vasopressors, dialysis), SEP-1 bundle gaps to close,
+  and safety monitoring labs.
+* `mid_term_plan` — discharge readiness criteria, antibiotic
+  step-down / oral switch, outpatient follow-up, chronic disease management
+  adjusted for this admission (e.g. hold nephrotoxins, new AKI baseline),
+  and rehabilitation / nutrition targets.
+
 ### Output contract — return a SINGLE valid JSON object, nothing else
 ```json
 {
-  "summary":         "1-2 sentences summarising the sepsis picture",
-  "patient_score":   <integer 1..5>,
-  "final_diagnosis": "<one-line verdict>",
-  "details":         "Markdown paragraph: SOFA breakdown, SEP-1 bundle status, missing data flags",
-  "sepsis3_met":     <true|false|null>,
-  "sep1_compliant":  <true|false|null>
+  "summary":              "1-2 sentences summarising the sepsis picture",
+  "patient_score":        <integer 1..5>,
+  "final_diagnosis":      "<one-line verdict>",
+  "details":              "Markdown: SOFA breakdown, SEP-1 bundle status, missing data flags",
+  "sepsis3_met":          <true|false|null>,
+  "sep1_compliant":       <true|false|null>,
+  "next_steps":           "Markdown bullet list of immediate actions (0-6 h)",
+  "short_term_treatment": "Markdown: acute treatment plan (6-72 h)",
+  "mid_term_plan":        "Markdown: post-acute plan (day 3-30)"
 }
 ```
 
@@ -133,14 +155,17 @@ Produce the JSON verdict now."""
 
     parsed = _parse_verdict(raw)
     output = {
-        "summary": parsed.get("summary", "Concise summary unavailable."),
-        "patient_score": _coerce_score(parsed.get("patient_score")),
-        "final_diagnosis": parsed.get("final_diagnosis", "Indeterminate."),
-        "details": parsed.get("details", raw),
-        "sepsis3_met": parsed.get("sepsis3_met"),
-        "sep1_compliant": parsed.get("sep1_compliant"),
-        "agent_trace_part1": part1_inputs,
-        "raw_response": raw,
+        "summary":              parsed.get("summary", "Concise summary unavailable."),
+        "patient_score":        _coerce_score(parsed.get("patient_score")),
+        "final_diagnosis":      parsed.get("final_diagnosis", "Indeterminate."),
+        "details":              parsed.get("details", raw),
+        "sepsis3_met":          parsed.get("sepsis3_met"),
+        "sep1_compliant":       parsed.get("sep1_compliant"),
+        "next_steps":           parsed.get("next_steps", ""),
+        "short_term_treatment": parsed.get("short_term_treatment", ""),
+        "mid_term_plan":        parsed.get("mid_term_plan", ""),
+        "agent_trace_part1":    part1_inputs,
+        "raw_response":         raw,
     }
 
     if memory_manager is not None:

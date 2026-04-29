@@ -49,17 +49,17 @@ with st.sidebar:
         'color:#4F8EF7;opacity:0.8;margin:0 0 0.4rem 0;">USER</p>',
         unsafe_allow_html=True,
     )
-    st.button("⚙️  Settings",        on_click=set_page, args=("Settings",),        use_container_width=True, type="primary"   if st.session_state.current_page == "Settings"        else "secondary")
-    st.button("📊  Dashboard",        on_click=set_page, args=("Dashboard",),       use_container_width=True, type="primary"   if st.session_state.current_page == "Dashboard"       else "secondary")
-    st.button("🔬  Agent Workspace",  on_click=set_page, args=("Agent Workspace",), use_container_width=True, type="primary"   if st.session_state.current_page == "Agent Workspace" else "secondary")
-    st.button("📋  Patient History",  on_click=set_page, args=("Patient History",), use_container_width=True, type="primary"   if st.session_state.current_page == "Patient History" else "secondary")
+    st.button("Settings",        on_click=set_page, args=("Settings",),        use_container_width=True, type="primary"   if st.session_state.current_page == "Settings"        else "secondary")
+    st.button("Dataset Explorer",        on_click=set_page, args=("Dashboard",),       use_container_width=True, type="primary"   if st.session_state.current_page == "Dashboard"       else "secondary")
+    st.button("Agent Workspace",  on_click=set_page, args=("Agent Workspace",), use_container_width=True, type="primary"   if st.session_state.current_page == "Agent Workspace" else "secondary")
+    st.button("Patient History",  on_click=set_page, args=("Patient History",), use_container_width=True, type="primary"   if st.session_state.current_page == "Patient History" else "secondary")
 
     st.markdown(
         '<p style="font-size:0.7rem;font-weight:600;letter-spacing:0.1em;'
         'color:#4F8EF7;opacity:0.8;margin:1rem 0 0.4rem 0;">ADMIN</p>',
         unsafe_allow_html=True,
     )
-    st.button("🧠  Agent Controller", on_click=set_page, args=("Agent Controller",), use_container_width=True, type="primary" if st.session_state.current_page == "Agent Controller" else "secondary")
+    st.button("Agent Controller", on_click=set_page, args=("Agent Controller",), use_container_width=True, type="primary" if st.session_state.current_page == "Agent Controller" else "secondary")
 
     st.markdown(
         '<hr style="border-color:rgba(79,142,247,0.18);margin:1.5rem 0 0.75rem 0;">',

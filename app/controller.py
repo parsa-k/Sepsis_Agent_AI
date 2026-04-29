@@ -12,13 +12,17 @@ import os
 
 import streamlit as st
 
-from agents.orchestrator_agent import SYSTEM_PROMPT as DEFAULT_ORCHESTRATOR
+from agents.orchestrator_agent import (
+    SYSTEM_PROMPT        as DEFAULT_ORCHESTRATOR,
+    REPLAN_SYSTEM_PROMPT as DEFAULT_ORCHESTRATOR_REPLAN,
+)
 from agents.vitals_agent       import SYSTEM_PROMPT as DEFAULT_VITALS
 from agents.lab_agent          import SYSTEM_PROMPT as DEFAULT_LAB
 from agents.microbiology_agent import SYSTEM_PROMPT as DEFAULT_MICROBIOLOGY
 from agents.pharmacy_agent     import SYSTEM_PROMPT as DEFAULT_PHARMACY
 from agents.history_agent      import SYSTEM_PROMPT as DEFAULT_HISTORY
 from agents.diagnoses_agent    import SYSTEM_PROMPT as DEFAULT_DIAGNOSES
+from agents.evaluator_agent    import SYSTEM_PROMPT as DEFAULT_EVALUATOR
 from agents._agent_utils       import TWO_PART_OUTPUT_INSTRUCTIONS as DEFAULT_TWO_PART_FORMAT
 
 
@@ -27,14 +31,27 @@ PROMPTS_FILE = "custom_prompts.json"
 AGENT_DEFS = [
     {
         "key":         "prompt_orchestrator",
-        "label":       "Orchestrator",
+        "label":       "Orchestrator (Phase 1)",
         "icon":        "🧠",
         "description": (
-            "Dynamic planner — reads user intent and data flags to decide "
-            "which feature agents to activate and whether History runs first."
+            "Phase-1 pre-plan. Decides whether the History Agent must run "
+            "first and crafts an intent-aware instruction for it. No "
+            "feature agents are picked at this phase."
         ),
         "pipeline_name": "orchestrator",
         "default":     DEFAULT_ORCHESTRATOR,
+    },
+    {
+        "key":         "prompt_orchestrator_replan",
+        "label":       "Orchestrator (Phase 2)",
+        "icon":        "🧭",
+        "description": (
+            "Phase-2 re-plan. Runs after the History Agent (or directly "
+            "for single-visit runs). Picks the active feature agents and "
+            "writes their per-agent, baseline-aware instructions."
+        ),
+        "pipeline_name": "orchestrator_replan",
+        "default":     DEFAULT_ORCHESTRATOR_REPLAN,
     },
     {
         "key":         "prompt_history",
@@ -98,10 +115,24 @@ AGENT_DEFS = [
         "description": (
             "Master reasoning agent. Consumes Part-1 payloads from all "
             "active feature agents and emits the final summary, Patient "
-            "State Score (1–5), Sepsis-3 verdict, and SEP-1 compliance."
+            "State Score (1–5), Sepsis-3 verdict, SEP-1 compliance, and "
+            "the immediate / short-term / mid-term treatment plans."
         ),
         "pipeline_name": "diagnoses",
         "default":     DEFAULT_DIAGNOSES,
+    },
+    {
+        "key":         "prompt_evaluator",
+        "label":       "Evaluator Agent",
+        "icon":        "✅",
+        "description": (
+            "Final quality gate. Reads the user intent, raw-data digest, "
+            "Orchestrator plan, every Part-1 payload, and the Diagnoses "
+            "verdict, then emits a green / yellow / red flag plus an "
+            "audit report on overall and per-agent performance."
+        ),
+        "pipeline_name": "evaluator",
+        "default":     DEFAULT_EVALUATOR,
     },
     {
         "key":         "prompt_two_part_format",
