@@ -48,6 +48,22 @@ Rules:
 """
 
 
+def _live_format_instructions() -> str:
+    """Return the two-part output format block.
+
+    If the user has edited the template via the Agent Controller UI the
+    session-state value is used; otherwise the built-in constant is returned.
+    This function is intentionally lazy-importing streamlit so the module
+    stays importable in test contexts where Streamlit is not running.
+    """
+    try:
+        import streamlit as st  # noqa: PLC0415
+        live = st.session_state.get("prompt_two_part_format", "").strip()
+        return live if live else TWO_PART_OUTPUT_INSTRUCTIONS
+    except Exception:  # noqa: BLE001
+        return TWO_PART_OUTPUT_INSTRUCTIONS
+
+
 def visits_section(visits_data: dict, selected: list, key: str, label: str) -> str:
     """Format the per-visit raw text for one data domain."""
     if not selected:
@@ -148,7 +164,7 @@ def run_feature_agent(
         + "\n\nProvide your analysis in the required two-part JSON format now."
     )
 
-    prompt = (custom_system_prompt or system_prompt).rstrip() + "\n" + TWO_PART_OUTPUT_INSTRUCTIONS
+    prompt = (custom_system_prompt or system_prompt).rstrip() + "\n" + _live_format_instructions()
 
     if memory_manager is not None:
         memory_manager.standardize_input(agent_name, {"human": human_content})

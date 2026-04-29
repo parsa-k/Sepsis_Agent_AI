@@ -116,14 +116,16 @@ def _resolve_patient(search_val: int, search_type: str):
 
 def _render_patient_banner(subject_id, hadm_id, row):
     st.markdown(
-        f'<div style="background:#b0bbcf;border-radius:12px;'
-        f'padding:1rem 1.5rem;margin:1rem 0;">'
-        f'<strong>Patient:</strong> {subject_id} &nbsp;|&nbsp;'
-        f'<strong>Primary admission:</strong> {hadm_id} &nbsp;|&nbsp;'
-        f'<strong>Gender:</strong> {row.get("gender", "N/A")} &nbsp;|&nbsp;'
-        f'<strong>Age:</strong> {row.get("anchor_age", "N/A")} &nbsp;|&nbsp;'
-        f'<strong>Admit:</strong> {row.get("admittime", "N/A")} &nbsp;|&nbsp;'
-        f'<strong>Type:</strong> {row.get("admission_type", "N/A")}'
+        f'<div style="background:linear-gradient(135deg,#1C2E45,#243555);'
+        f'color:#C8D8F0;border-radius:12px;padding:1rem 1.5rem;margin:1rem 0;'
+        f'border:1px solid rgba(79,142,247,0.2);'
+        f'box-shadow:0 4px 16px rgba(13,27,42,0.18);">'
+        f'<strong style="color:#fff;">Patient:</strong> {subject_id} &nbsp;|&nbsp;'
+        f'<strong style="color:#fff;">Primary admission:</strong> {hadm_id} &nbsp;|&nbsp;'
+        f'<strong style="color:#fff;">Gender:</strong> {row.get("gender", "N/A")} &nbsp;|&nbsp;'
+        f'<strong style="color:#fff;">Age:</strong> {row.get("anchor_age", "N/A")} &nbsp;|&nbsp;'
+        f'<strong style="color:#fff;">Admit:</strong> {row.get("admittime", "N/A")} &nbsp;|&nbsp;'
+        f'<strong style="color:#fff;">Type:</strong> {row.get("admission_type", "N/A")}'
         f'</div>',
         unsafe_allow_html=True,
     )
@@ -213,10 +215,14 @@ def _render_results(result: dict):
     st.markdown("### Final Result")
 
     st.markdown(
-        f"<div style='background:#1e2a3a;color:#fff;padding:1rem 1.25rem;"
-        f"border-radius:12px;'>"
-        f"<div style='font-size:0.85rem;opacity:0.8;'>Sepsis summary</div>"
-        f"<div style='font-size:1.05rem;'>{_html_escape(summary)}</div>"
+        f"<div style='background:linear-gradient(135deg,#1C2E45,#243555);"
+        f"color:#C8D8F0;padding:1rem 1.25rem;border-radius:12px;"
+        f"border:1px solid rgba(79,142,247,0.2);"
+        f"box-shadow:0 4px 16px rgba(13,27,42,0.15);'>"
+        f"<div style='font-size:0.78rem;font-weight:600;letter-spacing:0.07em;"
+        f"color:#4F8EF7;margin-bottom:0.35rem;'>SEPSIS SUMMARY</div>"
+        f"<div style='font-size:1.02rem;color:#EAF0FF;line-height:1.55;'>"
+        f"{_html_escape(summary)}</div>"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -227,8 +233,9 @@ def _render_results(result: dict):
     with diag_col:
         st.markdown("**Final diagnosis**")
         st.markdown(
-            f"<div style='background:#b0bbcf;padding:0.85rem 1rem;"
-            f"border-radius:10px;font-weight:600;'>"
+            f"<div style='background:#EEF3FC;padding:0.85rem 1rem;"
+            f"border-radius:10px;font-weight:600;color:#1A2C50;"
+            f"border:1px solid #D0DEFA;'>"
             f"{_html_escape(final_diagnosis)}</div>",
             unsafe_allow_html=True,
         )
@@ -263,19 +270,23 @@ def _render_orchestrator_decision(decision: dict):
 
 def _render_patient_score(score: int):
     palette = {
-        1: ("#1e8e3e", "Good"),
-        2: ("#7cb342", "Mild"),
-        3: ("#f2994a", "Moderate"),
-        4: ("#e67e22", "Severe"),
-        5: ("#c0392b", "Critical"),
+        1: ("#059669", "Good"),
+        2: ("#65A30D", "Mild"),
+        3: ("#D97706", "Moderate"),
+        4: ("#EA580C", "Severe"),
+        5: ("#DC2626", "Critical"),
     }
-    color, label = palette.get(int(score or 3), ("#888", "—"))
+    color, label = palette.get(int(score or 3), ("#64748B", "—"))
     st.markdown(
-        f"<div style='background:{color};color:white;border-radius:12px;"
-        f"padding:1rem;text-align:center;'>"
-        f"<div style='font-size:0.8rem;opacity:0.85;'>Patient State Score</div>"
-        f"<div style='font-size:2.5rem;font-weight:700;'>{int(score or 3)}/5</div>"
-        f"<div style='font-size:0.95rem;'>{label}</div>"
+        f"<div style='background:{color};color:white;border-radius:14px;"
+        f"padding:1.25rem 1rem;text-align:center;"
+        f"box-shadow:0 4px 16px {color}44;'>"
+        f"<div style='font-size:0.72rem;font-weight:600;letter-spacing:0.08em;"
+        f"opacity:0.88;margin-bottom:0.3rem;'>PATIENT STATE SCORE</div>"
+        f"<div style='font-size:2.8rem;font-weight:800;line-height:1;'>"
+        f"{int(score or 3)}/5</div>"
+        f"<div style='font-size:0.9rem;font-weight:600;margin-top:0.3rem;'>"
+        f"{label}</div>"
         f"</div>",
         unsafe_allow_html=True,
     )

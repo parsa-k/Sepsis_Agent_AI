@@ -124,13 +124,14 @@ def _render_charts(metrics: dict):
         fig = px.pie(
             gender_df, names="gender", values="cnt",
             title="Gender Distribution",
-            color_discrete_sequence=["#667eea", "#f45c43", "#38ef7d"],
+            color_discrete_sequence=["#4F8EF7", "#7C3AED", "#10B981"],
             hole=0.45,
         )
         fig.update_layout(
             font_family="Inter",
             plot_bgcolor="rgba(0,0,0,0)",
             paper_bgcolor="rgba(0,0,0,0)",
+            title_font_color="#1A2C50",
         )
         st.plotly_chart(fig, use_container_width=True)
 
@@ -140,7 +141,7 @@ def _render_charts(metrics: dict):
             adm_df, x="cnt", y="admission_type",
             orientation="h", title="Top Admission Types",
             color="cnt",
-            color_continuous_scale=["#667eea", "#764ba2"],
+            color_continuous_scale=["#4F8EF7", "#7C3AED"],
         )
         fig.update_layout(
             font_family="Inter",
@@ -149,6 +150,7 @@ def _render_charts(metrics: dict):
             showlegend=False,
             yaxis_title="", xaxis_title="Count",
             coloraxis_showscale=False,
+            title_font_color="#1A2C50",
         )
         st.plotly_chart(fig, use_container_width=True)
 
@@ -318,7 +320,8 @@ def render_vitals_chart(df):
         fig = px.line(
             plot_df, x="charttime", y="valuenum",
             title=f"{selected_vital} Over Time",
-            markers=True
+            markers=True,
+            color_discrete_sequence=["#4F8EF7"],
         )
         fig.update_layout(
             font_family="Inter",
@@ -326,7 +329,11 @@ def render_vitals_chart(df):
             paper_bgcolor="rgba(0,0,0,0)",
             xaxis_title="Time",
             yaxis_title=selected_vital,
+            title_font_color="#1A2C50",
+            xaxis=dict(gridcolor="rgba(208,222,250,0.5)"),
+            yaxis=dict(gridcolor="rgba(208,222,250,0.5)"),
         )
+        fig.update_traces(marker_size=6, line_width=2)
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.warning("No numeric data to plot for the selected vital sign.")
