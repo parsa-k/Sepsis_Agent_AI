@@ -1,63 +1,142 @@
 """
 Central state schema for the Sepsis Diagnostic LangGraph workflow.
 
-Every agent reads from / writes to this TypedDict.  The Orchestrator
-coordinates the entire flow; five feature agents produce per-domain
-analyses; the Diagnostician and Compliance agents produce final verdicts.
+The pipeline has been refactored around a strict **two-part output**
+contract for every feature agent:
+
+    part1_payload   — distilled, actionable facts + source records
+                       (the ONLY thing propagated downstream)
+    part2_reasoning — detailed rationale (kept for the UI / audit trail
+                       but never injected into another agent's prompt)
+
+The Orchestrator dynamically decides which feature agents to activate
+based on the user's free-text intent and the per-visit data flags. If
+the user selected more than one visit, the History Agent runs first to
+extract a baseline that the Orchestrator then propagates to the
+remaining feature agents.
 """
 
 from __future__ import annotations
-from typing import TypedDict, Optional
+from typing import TypedDict, Optional, Any
 
+
+# ── Canonical two-part agent output ──────────────────────────────────────────
+
+class AgentOutput(TypedDict, total=False):
+    """Strict envelope every feature agent must produce."""
+    part1_payload: dict
+    """
+    {
+        "actionable": { ... distilled facts ... },
+        "source_records": [ "<short record reference>", ... ]
+    }
+    """
+
+    part2_reasoning: str
+    """Long-form explanation — never propagated downstream."""
+
+    skipped: bool
+    """True when the orchestrator did not activate this agent."""
+
+    agent_name: str
+    parse_error: Optional[str]
+
+
+# ── Orchestrator decision envelope ───────────────────────────────────────────
+
+class OrchestratorDecision(TypedDict, total=False):
+    role: str
+    """High-level mission statement (e.g. 'Sepsis-3 + SEP-1 audit')."""
+
+    user_intent: str
+    """Verbatim user instruction echoed back for downstream context."""
+
+    multi_visit: bool
+    history_first: bool
+    """When True the History Agent runs before any other feature agent."""
+
+    active_agents: list  # list[str]
+    """Subset of {'vitals','lab','microbiology','pharmacy'} to run."""
+
+    agent_instructions: dict  # dict[str, str]
+    """Per-agent dynamic instructions injected into their human messages."""
+
+    rationale: str
+    raw_response: str
+
+
+# ── Memory-manager session metadata ──────────────────────────────────────────
+
+class MemorySession(TypedDict, total=False):
+    patient_id: str
+    session_id: str
+    directory: str
+    log_path: str
+    summary_path: str
+
+
+# ── Master pipeline state ────────────────────────────────────────────────────
 
 class SepsisState(TypedDict, total=False):
-    # ── Input ─────────────────────────────────────────────────────────────────
+    # ── Input ─────────────────────────────────────────────────────────────
     subject_id: int
-    hadm_id: int
+    selected_hadm_ids: list   # list[int] — visit(s) the user picked
+    user_intent: str          # free-text instruction to the Orchestrator
 
-    # ── Raw data from DuckDB (populated by data_loader) ──────────────────────
+    # ── Loaded raw data ──────────────────────────────────────────────────
     patient_info: dict
-    vitals_raw: str
-    labs_raw: str
-    microbiology_raw: str
-    prescriptions_raw: str
-    input_events_raw: str
-    output_events_raw: str
-    icu_stays_raw: str
-    diagnoses_raw: str
+    visits_data: dict
+    """
+    {
+        <hadm_id>: {
+            "vitals_raw": str, "labs_raw": str, "microbiology_raw": str,
+            "prescriptions_raw": str, "input_events_raw": str,
+            "output_events_raw": str, "icu_stays_raw": str,
+            "diagnoses_raw": str, "admission_info": dict,
+        }, ...
+    }
+    """
+    available_data_flags: dict
+    """
+    {
+        <hadm_id>: {
+            "vitals": bool, "labs": bool, "microbiology": bool,
+            "pharmacy": bool, "icu": bool, "diagnoses": bool,
+        }, ...
+    }
+    """
     historical_admissions_raw: str
 
-    # ── Orchestrator planning output ─────────────────────────────────────────
-    orchestrator_plan: str
+    # ── Orchestrator output ──────────────────────────────────────────────
+    orchestrator_decision: dict   # OrchestratorDecision
 
-    # ── Feature agent outputs (one per clinical domain) ──────────────────────
-    vitals_analysis: str
-    lab_analysis: str
-    microbiology_analysis: str
-    pharmacy_analysis: str
-    history_analysis: str
+    # ── History baseline (propagated downstream when multi-visit) ────────
+    history_output: dict          # full AgentOutput
+    history_baseline: dict        # = history_output['part1_payload']
 
-    # ── Diagnostician agent output ───────────────────────────────────────────
-    sofa_score: str
-    organ_dysfunction: str
-    sepsis3_met: Optional[bool]
-    sepsis3_reasoning: str
+    # ── Feature agent outputs (each is a full AgentOutput) ───────────────
+    vitals_output: dict
+    lab_output: dict
+    microbiology_output: dict
+    pharmacy_output: dict
 
-    # ── Compliance agent output ──────────────────────────────────────────────
-    sirs_criteria: str
-    lactate_timing: str
-    sep1_met: Optional[bool]
-    sep1_reasoning: str
-    missing_data_queries: str
+    # ── Diagnoses Agent (master) output ──────────────────────────────────
+    diagnoses_output: dict
+    """
+    {
+        "summary":      str,    # concise sepsis summary (intro line)
+        "patient_score": int,   # 1 (Good) … 5 (Critical)
+        "final_diagnosis": str, # one-line verdict
+        "details":      str,    # supporting paragraph(s)
+        "agent_trace_part1": [
+            {"agent": str, "part1_payload": dict}, ...
+        ]
+    }
+    """
 
-    # ── Reflection loop control ──────────────────────────────────────────────
-    reflection_count: int
-    reflection_notes: str
+    # ── Memory manager + trace ───────────────────────────────────────────
+    memory_session: dict  # MemorySession
+    agent_trace: list     # list[{"agent": str, "kind": str, "content": Any}]
 
-    # ── Final output (orchestrator synthesis) ────────────────────────────────
-    final_academic_diagnosis: Optional[bool]
-    final_sep1_compliance: Optional[bool]
-    final_summary: str
-
-    # ── Agent trace (for UI) ─────────────────────────────────────────────────
-    agent_trace: list  # list[dict] — each entry is {"agent": str, "content": str}
+    # ── Convenience flags ────────────────────────────────────────────────
+    error: Optional[str]

@@ -1,253 +1,260 @@
 """
-LangGraph orchestrator — wires the Orchestrator and all specialised agents
-into a state machine with a conditional reflection loop.
+LangGraph wiring for the refactored Sepsis Diagnostic system.
 
-Flow:
-  data_loader
-    -> orchestrator_plan
-    -> vitals -> lab -> microbiology -> pharmacy -> history
-    -> diagnostician -> compliance
-    -> (reflect? -> back to vitals | orchestrator_synthesize -> END)
+Flow
+----
+```
+data_loader
+    └─► orchestrator
+            ├─► (multi-visit) ─► history ─► propagate_baseline ─► vitals ─► lab ─► microbiology ─► pharmacy ─► diagnoses ─► END
+            └─► (single visit) ──────────────────────────────────► vitals ─► lab ─► microbiology ─► pharmacy ─► diagnoses ─► END
+```
+
+* Each feature node is a no-op when ``orchestrator_decision.active_agents``
+  does not include it (handled inside the agent's helper).
+* The Memory Manager is constructed once per ``run_pipeline`` call and
+  injected into every agent via closure — agents never write directly to
+  disk, only the manager does.
 """
 
 from __future__ import annotations
+
 import traceback
-from typing import Literal
 
 from langgraph.graph import StateGraph, END
 
 from agents.state import SepsisState
-from agents.orchestrator_agent import run_orchestrator_plan, run_orchestrator_synthesize
+from agents.memory_manager_agent import MemoryManager
+from agents.orchestrator_agent import (
+    run_orchestrator,
+    needs_history_first,
+    propagate_history_baseline,
+)
+from agents.history_agent import run_history_agent
 from agents.vitals_agent import run_vitals_agent
 from agents.lab_agent import run_lab_agent
 from agents.microbiology_agent import run_microbiology_agent
 from agents.pharmacy_agent import run_pharmacy_agent
-from agents.history_agent import run_history_agent
-from agents.diagnostician_agent import run_diagnostician_agent
-from agents.compliance_agent import run_compliance_agent
+from agents.diagnoses_agent import run_diagnoses_agent
 
 import db
 
 
-MAX_REFLECTIONS = 3
+# ── Data loader ─────────────────────────────────────────────────────────────
+
+def make_data_loader(memory_manager: MemoryManager):
+    def data_loader(state: SepsisState) -> dict:
+        conn = db.get_conn()
+        subject_id = state["subject_id"]
+        selected = list(state.get("selected_hadm_ids") or [])
+        if not selected and "hadm_id" in state:
+            selected = [state["hadm_id"]]
+        if not selected:
+            patient_df = db.find_patient(conn, subject_id=subject_id)
+            if patient_df.empty:
+                conn.close()
+                return {"error": "No admissions found for this subject."}
+            selected = [int(patient_df.iloc[0]["hadm_id"])]
+
+        primary_hadm = selected[0]
+        admission_df = db.find_patient(conn, hadm_id=primary_hadm)
+        patient_info = (
+            admission_df.to_dict(orient="records")[0]
+            if len(admission_df) else {}
+        )
+
+        visits_data: dict = {}
+        flags: dict = {}
+        for hadm in selected:
+            adm_df = db.find_patient(conn, hadm_id=hadm)
+            adm_info = adm_df.to_dict(orient="records")[0] if len(adm_df) else {}
+
+            vitals_df = db.get_vitals(conn, subject_id, hadm)
+            labs_df = db.get_labs(conn, subject_id, hadm)
+            micro_df = db.get_microbiology(conn, subject_id, hadm)
+            rx_df = db.get_prescriptions(conn, subject_id, hadm)
+            icu_df = db.get_icu_stays(conn, subject_id, hadm)
+            dx_df = db.get_diagnoses(conn, subject_id, hadm)
+            input_df = db.get_input_events(conn, subject_id, hadm)
+            output_df = db.get_output_events(conn, subject_id, hadm)
+
+            visits_data[hadm] = {
+                "admission_info": adm_info,
+                "vitals_raw": _summarise(vitals_df),
+                "labs_raw": _summarise(labs_df),
+                "microbiology_raw": _summarise(micro_df),
+                "prescriptions_raw": _summarise(rx_df),
+                "icu_stays_raw": _summarise(icu_df),
+                "diagnoses_raw": _summarise(dx_df),
+                "input_events_raw": _summarise(input_df),
+                "output_events_raw": _summarise(output_df),
+            }
+            flags[hadm] = {
+                "vitals": not vitals_df.empty,
+                "labs": not labs_df.empty,
+                "microbiology": not micro_df.empty,
+                "pharmacy": (not rx_df.empty)
+                            or (not input_df.empty)
+                            or (not output_df.empty),
+                "icu": not icu_df.empty,
+                "diagnoses": not dx_df.empty,
+            }
+
+        hist_df = db.get_historical_admissions(
+            conn, subject_id, current_hadm_id=primary_hadm
+        )
+        conn.close()
+
+        trace_entry = {
+            "agent": "data_loader",
+            "kind": "loaded",
+            "content": {
+                "subject_id": subject_id,
+                "visits": selected,
+                "row_counts": {
+                    h: {k: (v != "No data available.") for k, v in d.items() if k.endswith("_raw")}
+                    for h, d in visits_data.items()
+                },
+            },
+        }
+        memory_manager.record_event("data_loader", trace_entry["content"])
+
+        return {
+            "subject_id": subject_id,
+            "selected_hadm_ids": selected,
+            "patient_info": patient_info,
+            "visits_data": visits_data,
+            "available_data_flags": flags,
+            "historical_admissions_raw": _summarise(hist_df),
+            "memory_session": memory_manager.session_metadata(),
+            "agent_trace": (state.get("agent_trace") or []) + [trace_entry],
+        }
+    return data_loader
 
 
-# ── Node: load data from DuckDB ─────────────────────────────────────────────
-
-def data_loader(state: SepsisState) -> dict:
-    conn = db.get_conn()
-    subject_id = state["subject_id"]
-    hadm_id = state["hadm_id"]
-
-    admission_df = db.find_patient(conn, subject_id=subject_id, hadm_id=hadm_id)
-    patient_info = admission_df.to_dict(orient="records")[0] if len(admission_df) else {}
-
-    vitals_df = db.get_vitals(conn, subject_id, hadm_id)
-    labs_df = db.get_labs(conn, subject_id, hadm_id)
-    micro_df = db.get_microbiology(conn, subject_id, hadm_id)
-    rx_df = db.get_prescriptions(conn, subject_id, hadm_id)
-    icu_df = db.get_icu_stays(conn, subject_id, hadm_id)
-    dx_all = db.get_diagnoses(conn, subject_id)
-    hist_df = db.get_historical_admissions(conn, subject_id, hadm_id)
-    input_df = db.get_input_events(conn, subject_id, hadm_id)
-    output_df = db.get_output_events(conn, subject_id, hadm_id)
-
-    def _summarise(df, max_rows=80):
-        if df is None or df.empty:
-            return "No data available."
-        return df.head(max_rows).to_string(index=False)
-
-    conn.close()
-
-    trace_entry = {
-        "agent": "Data Loader",
-        "content": (
-            f"Loaded data for subject {subject_id}, admission {hadm_id}.\n"
-            f"  Vitals rows: {len(vitals_df)}\n"
-            f"  Lab rows: {len(labs_df)}\n"
-            f"  Microbiology rows: {len(micro_df)}\n"
-            f"  Prescriptions: {len(rx_df)}\n"
-            f"  ICU stays: {len(icu_df)}\n"
-            f"  Diagnoses: {len(dx_all)}\n"
-            f"  Historical admissions: {len(hist_df)}\n"
-            f"  Input events: {len(input_df)}\n"
-            f"  Output events: {len(output_df)}"
-        ),
-    }
-
-    return {
-        "patient_info": patient_info,
-        "vitals_raw": _summarise(vitals_df),
-        "labs_raw": _summarise(labs_df),
-        "microbiology_raw": _summarise(micro_df),
-        "prescriptions_raw": _summarise(rx_df),
-        "icu_stays_raw": _summarise(icu_df),
-        "diagnoses_raw": _summarise(dx_all),
-        "historical_admissions_raw": _summarise(hist_df),
-        "input_events_raw": _summarise(input_df),
-        "output_events_raw": _summarise(output_df),
-        "reflection_count": 0,
-        "agent_trace": [trace_entry],
-    }
+def _summarise(df, max_rows: int = 80) -> str:
+    if df is None or len(df) == 0:
+        return "No data available."
+    return df.head(max_rows).to_string(index=False)
 
 
-# ── Node factories (inject LLM + optional custom prompt at build time) ───────
+# ── Node factories ──────────────────────────────────────────────────────────
 
-def make_orchestrator_plan_node(llm, custom_prompt=None):
+def _make_node(fn, llm, memory_manager, prompt_key, custom_prompts):
+    custom = (custom_prompts or {}).get(prompt_key)
+
     def node(state: SepsisState) -> dict:
-        return run_orchestrator_plan(state, llm, system_prompt=custom_prompt)
+        return fn(state, llm, memory_manager=memory_manager, system_prompt=custom)
     return node
 
 
-def make_orchestrator_synth_node(llm, custom_prompt=None):
-    def node(state: SepsisState) -> dict:
-        return run_orchestrator_synthesize(state, llm, system_prompt=custom_prompt)
-    return node
+# ── Graph builder ───────────────────────────────────────────────────────────
 
-
-def make_vitals_node(llm, custom_prompt=None):
-    def node(state: SepsisState) -> dict:
-        return run_vitals_agent(state, llm, system_prompt=custom_prompt)
-    return node
-
-
-def make_lab_node(llm, custom_prompt=None):
-    def node(state: SepsisState) -> dict:
-        return run_lab_agent(state, llm, system_prompt=custom_prompt)
-    return node
-
-
-def make_microbiology_node(llm, custom_prompt=None):
-    def node(state: SepsisState) -> dict:
-        return run_microbiology_agent(state, llm, system_prompt=custom_prompt)
-    return node
-
-
-def make_pharmacy_node(llm, custom_prompt=None):
-    def node(state: SepsisState) -> dict:
-        return run_pharmacy_agent(state, llm, system_prompt=custom_prompt)
-    return node
-
-
-def make_history_node(llm, custom_prompt=None):
-    def node(state: SepsisState) -> dict:
-        return run_history_agent(state, llm, system_prompt=custom_prompt)
-    return node
-
-
-def make_diagnostician_node(llm, custom_prompt=None):
-    def node(state: SepsisState) -> dict:
-        return run_diagnostician_agent(state, llm, system_prompt=custom_prompt)
-    return node
-
-
-def make_compliance_node(llm, custom_prompt=None):
-    def node(state: SepsisState) -> dict:
-        return run_compliance_agent(state, llm, system_prompt=custom_prompt)
-    return node
-
-
-# ── Reflection node ──────────────────────────────────────────────────────────
-
-def reflection_node(state: SepsisState) -> dict:
-    count = state.get("reflection_count", 0) + 1
-    missing = state.get("missing_data_queries", "")
-    note = (
-        f"Reflection #{count}: Academic Sepsis-3 = YES but SEP-1 = NO. "
-        f"Re-examining chart for missing documentation.\n"
-        f"Missing items flagged: {missing}"
-    )
-    trace_entry = {"agent": "Reflection Loop", "content": note}
-    existing_trace = state.get("agent_trace", [])
-    return {
-        "reflection_count": count,
-        "reflection_notes": note,
-        "agent_trace": existing_trace + [trace_entry],
-    }
-
-
-# ── Conditional edge after compliance ────────────────────────────────────────
-
-def should_reflect(state: SepsisState) -> Literal["reflect", "synthesize"]:
-    sepsis3 = state.get("sepsis3_met")
-    sep1 = state.get("sep1_met")
-    count = state.get("reflection_count", 0)
-
-    if sepsis3 is True and sep1 is False and count < MAX_REFLECTIONS:
-        return "reflect"
-    return "synthesize"
-
-
-# ── Graph builder ────────────────────────────────────────────────────────────
-
-def build_graph(llm, custom_prompts: dict | None = None):
-    """
-    Build the LangGraph state machine.
-
-    custom_prompts: optional dict with keys matching agent names:
-        'orchestrator', 'vitals', 'lab', 'microbiology', 'pharmacy',
-        'history', 'diagnostician', 'compliance'
-    """
-    prompts = custom_prompts or {}
-
+def build_graph(
+    llm,
+    memory_manager: MemoryManager,
+    custom_prompts: dict | None = None,
+):
     graph = StateGraph(SepsisState)
 
-    # Nodes
-    graph.add_node("data_loader", data_loader)
-    graph.add_node("orchestrator_plan", make_orchestrator_plan_node(llm, prompts.get("orchestrator")))
-    graph.add_node("vitals", make_vitals_node(llm, prompts.get("vitals")))
-    graph.add_node("lab", make_lab_node(llm, prompts.get("lab")))
-    graph.add_node("microbiology", make_microbiology_node(llm, prompts.get("microbiology")))
-    graph.add_node("pharmacy", make_pharmacy_node(llm, prompts.get("pharmacy")))
-    graph.add_node("history", make_history_node(llm, prompts.get("history")))
-    graph.add_node("diagnostician", make_diagnostician_node(llm, prompts.get("diagnostician")))
-    graph.add_node("compliance", make_compliance_node(llm, prompts.get("compliance")))
-    graph.add_node("reflect", reflection_node)
-    graph.add_node("orchestrator_synthesize", make_orchestrator_synth_node(llm, prompts.get("orchestrator")))
+    graph.add_node("data_loader", make_data_loader(memory_manager))
+    graph.add_node(
+        "orchestrator",
+        _make_node(run_orchestrator, llm, memory_manager,
+                   "orchestrator", custom_prompts),
+    )
+    graph.add_node(
+        "history",
+        _make_node(run_history_agent, llm, memory_manager,
+                   "history", custom_prompts),
+    )
+    graph.add_node("propagate_baseline", propagate_history_baseline)
+    graph.add_node(
+        "vitals",
+        _make_node(run_vitals_agent, llm, memory_manager,
+                   "vitals", custom_prompts),
+    )
+    graph.add_node(
+        "lab",
+        _make_node(run_lab_agent, llm, memory_manager,
+                   "lab", custom_prompts),
+    )
+    graph.add_node(
+        "microbiology",
+        _make_node(run_microbiology_agent, llm, memory_manager,
+                   "microbiology", custom_prompts),
+    )
+    graph.add_node(
+        "pharmacy",
+        _make_node(run_pharmacy_agent, llm, memory_manager,
+                   "pharmacy", custom_prompts),
+    )
+    graph.add_node(
+        "diagnoses",
+        _make_node(run_diagnoses_agent, llm, memory_manager,
+                   "diagnoses", custom_prompts),
+    )
 
-    # Edges: linear flow
     graph.set_entry_point("data_loader")
-    graph.add_edge("data_loader", "orchestrator_plan")
-    graph.add_edge("orchestrator_plan", "vitals")
+    graph.add_edge("data_loader", "orchestrator")
+
+    graph.add_conditional_edges(
+        "orchestrator",
+        needs_history_first,
+        {"history": "history", "vitals": "vitals"},
+    )
+    graph.add_edge("history", "propagate_baseline")
+    graph.add_edge("propagate_baseline", "vitals")
+
     graph.add_edge("vitals", "lab")
     graph.add_edge("lab", "microbiology")
     graph.add_edge("microbiology", "pharmacy")
-    graph.add_edge("pharmacy", "history")
-    graph.add_edge("history", "diagnostician")
-    graph.add_edge("diagnostician", "compliance")
-
-    # Conditional: reflect or synthesize
-    graph.add_conditional_edges(
-        "compliance",
-        should_reflect,
-        {"reflect": "reflect", "synthesize": "orchestrator_synthesize"},
-    )
-
-    # Reflection loops back to first feature agent
-    graph.add_edge("reflect", "vitals")
-
-    # Synthesis -> END
-    graph.add_edge("orchestrator_synthesize", END)
+    graph.add_edge("pharmacy", "diagnoses")
+    graph.add_edge("diagnoses", END)
 
     return graph.compile()
 
 
-def run_pipeline(llm, subject_id: int, hadm_id: int, custom_prompts: dict | None = None) -> SepsisState:
-    app = build_graph(llm, custom_prompts=custom_prompts)
-    initial_state: SepsisState = {
-        "subject_id": subject_id,
-        "hadm_id": hadm_id,
+# ── Public entry point ──────────────────────────────────────────────────────
+
+def run_pipeline(
+    llm,
+    subject_id: int,
+    selected_hadm_ids: list,
+    user_intent: str = "",
+    custom_prompts: dict | None = None,
+    memory_manager: MemoryManager | None = None,
+) -> SepsisState:
+    """Execute the full pipeline and return the final state.
+
+    ``selected_hadm_ids`` should always be a list (one or more visits).
+    A new ``MemoryManager`` is created and used for the whole run unless
+    one is supplied (useful for tests).
+    """
+    if memory_manager is None:
+        memory_manager = MemoryManager(patient_id=subject_id)
+
+    app = build_graph(llm, memory_manager, custom_prompts=custom_prompts)
+    initial: SepsisState = {
+        "subject_id": int(subject_id),
+        "selected_hadm_ids": [int(h) for h in selected_hadm_ids],
+        "user_intent": user_intent or "",
         "agent_trace": [],
-        "reflection_count": 0,
     }
     try:
-        result = app.invoke(initial_state)
-        return result
-    except Exception as e:
-        error_trace = {
-            "agent": "Pipeline Error",
-            "content": f"Error: {e}\n{traceback.format_exc()}",
-        }
-        initial_state["agent_trace"] = [error_trace]
-        initial_state["final_summary"] = f"Pipeline failed: {e}"
-        return initial_state
+        result = app.invoke(initial)
+    except Exception as exc:
+        result = dict(initial)
+        result["error"] = f"Pipeline failed: {exc}"
+        result["agent_trace"] = (initial.get("agent_trace") or []) + [{
+            "agent": "pipeline",
+            "kind": "error",
+            "content": f"{exc}\n{traceback.format_exc()}",
+        }]
+        memory_manager.record_event(
+            "pipeline_error", {"error": str(exc),
+                               "trace": traceback.format_exc()},
+        )
+
+    memory_manager.finalise(result)
+    return result

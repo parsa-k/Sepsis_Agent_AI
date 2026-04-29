@@ -141,5 +141,12 @@ section[data-testid="stSidebar"] .stMarkdown label {
     margin: 2rem 0;
     border-radius: 2px;
 }
+    /* Hide only the Streamlit Deploy button, keep the header for theme settings */
+    .stAppDeployButton {
+        display: none !important;
+    }
+    [data-testid="stAppDeployButton"] {
+        display: none !important;
+    }
 </style>
 """

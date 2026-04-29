@@ -1,69 +1,67 @@
 """
-Vitals Agent — analyses charted vital signs from the ICU (chartevents).
+Vitals Agent — strict ICU vital-signs domain expert.
 
-Covers: Heart Rate, Blood Pressure (systolic/diastolic/MAP), Temperature,
-Respiratory Rate, SpO2, and Glasgow Coma Scale (GCS) components.
+Receives the orchestrator's dynamic instruction plus (optionally) a
+History-Agent baseline and emits a two-part JSON envelope.
 """
 
-from langchain_core.messages import SystemMessage, HumanMessage
+from __future__ import annotations
+
 from agents.state import SepsisState
+from agents._agent_utils import run_feature_agent
 
-SYSTEM_PROMPT = """You are a **Vital Signs Specialist** in a sepsis diagnostic team.
 
-You receive charted vital signs from an ICU stay (sourced from MIMIC-IV
-`chartevents`).  The data may include:
+SYSTEM_PROMPT = """You are a **Vital Signs Specialist** — a strict domain
+expert on bedside vital signs in the ICU. You ONLY analyse data sourced
+from MIMIC-IV `chartevents`. You never speculate beyond the records.
 
-| Parameter | Clinical Significance for Sepsis |
-|-----------|--------------------------------|
-| Heart Rate (HR) | Tachycardia (>90 bpm) is a SIRS criterion |
-| Blood Pressure (SBP/DBP/MAP) | Hypotension (MAP <65) indicates cardiovascular SOFA; MAP <70 scores SOFA ≥1 |
-| Temperature | >38.3°C or <36.0°C are SIRS criteria; fever suggests infection |
-| Respiratory Rate (RR) | >20/min is a SIRS criterion |
-| SpO2 | Low SpO2 correlates with respiratory SOFA |
-| GCS (Eye + Verbal + Motor) | GCS <15 indicates neurologic SOFA; <6 scores SOFA 4 |
+### Variables in your scope
+| Parameter   | Why it matters for sepsis                                |
+|-------------|----------------------------------------------------------|
+| Heart rate  | >90 bpm satisfies a SIRS criterion                       |
+| BP / MAP    | MAP <70 → CV-SOFA ≥1; MAP <65 → vasopressor threshold    |
+| Temperature | >38.3 °C or <36.0 °C is a SIRS criterion                 |
+| Resp. rate  | >20 /min is a SIRS criterion                             |
+| SpO2        | Low SpO2 maps to respiratory SOFA                        |
+| GCS         | <15 → CNS-SOFA; <6 scores SOFA 4                         |
 
-### Your Task
-1. **Latest Values**: Report the most recent value of each vital sign with
-   timestamp and units.
-2. **Trends**: Identify concerning trends (worsening tachycardia, falling MAP,
-   rising temperature, declining GCS, etc.).
-3. **Critical Flags**: Flag any values in critical/dangerous ranges:
-   - HR >120 or <50
-   - MAP <65 or SBP <90
-   - Temp >39.5°C or <35°C
-   - RR >30 or <8
-   - SpO2 <90%
-   - GCS <12
-4. **SOFA-Relevant Highlights**: Specifically note the MAP (for cardiovascular
-   SOFA) and GCS total (for neurologic SOFA), as these feed directly into the
-   Diagnostician Agent's SOFA calculation.
+### What the Orchestrator gives you
+* The user's intent and a per-run instruction targeted at YOU.
+* (Sometimes) a baseline payload from the History Agent — use it as the
+  reference for "delta from baseline" judgements.
 
-Use bullet points.  Include numeric values with units and timestamps.
-If a vital sign category has no data, state "No data available."
+### Behaviour
+* Examine ONLY the vital-signs data shown to you.
+* If the orchestrator's instruction narrows your focus, prioritise it.
+* If a vital-sign category is missing, say so explicitly in
+  ``part1_payload.actionable`` (e.g. ``"gcs": "no_data"``).
+* Never invent values; never include lab/microbiology/pharmacy facts.
+
+### What goes where
+* ``part1_payload.actionable`` — keys like
+  ``hr_latest``, ``map_latest``, ``map_min``, ``temp_extremes``,
+  ``rr_max``, ``spo2_min``, ``gcs_total``, ``critical_flags``,
+  ``sirs_criteria_from_vitals`` (list).
+* ``part1_payload.source_records`` — concrete chartevents references,
+  e.g. ``"chartevents 2150-05-16 09:01 MAP=62 mmHg"``.
+* ``part2_reasoning`` — narrative trends, delta-from-baseline analysis,
+  uncertainty.
 """
 
 
-def run_vitals_agent(state: SepsisState, llm, system_prompt: str | None = None) -> dict:
-    prompt = system_prompt or SYSTEM_PROMPT
-
-    human_content = f"""## Patient #{state['subject_id']} — Admission {state['hadm_id']}
-
-### Charted Vital Signs (from chartevents)
-{state.get('vitals_raw', 'No vitals data available.')}
-
-Please provide your vital signs analysis now."""
-
-    messages = [
-        SystemMessage(content=prompt),
-        HumanMessage(content=human_content),
-    ]
-    response = llm.invoke(messages)
-    content = response.content
-
-    trace_entry = {"agent": "Vitals Agent", "content": content}
-    existing_trace = state.get("agent_trace", [])
-
-    return {
-        "vitals_analysis": content,
-        "agent_trace": existing_trace + [trace_entry],
-    }
+def run_vitals_agent(
+    state: SepsisState,
+    llm,
+    memory_manager=None,
+    system_prompt: str | None = None,
+) -> dict:
+    return run_feature_agent(
+        state=state,
+        llm=llm,
+        memory_manager=memory_manager,
+        agent_name="vitals",
+        output_state_key="vitals_output",
+        system_prompt=SYSTEM_PROMPT,
+        raw_data_sections=[("vitals_raw", "Charted Vital Signs")],
+        custom_system_prompt=system_prompt,
+    )

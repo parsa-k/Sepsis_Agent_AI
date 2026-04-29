@@ -33,7 +33,7 @@ def _sync_from_widget(widget_key: str):
 def render():
     _restore_widget_keys()
 
-    st.markdown("# ⚙️ Settings & Configuration")
+    st.markdown("# Settings & Configuration")
     st.markdown(
         '<div class="section-divider"></div>',
         unsafe_allow_html=True,
@@ -66,14 +66,6 @@ def render():
         st.markdown("### API Keys")
         _render_api_key_input(provider)
         _render_save_load_buttons()
-
-        if secrets_file_exists():
-            st.markdown(
-                "<small style='color:#888;'>Keys are saved locally in "
-                "<code>.secrets.json</code> (not committed to git).</small>",
-                unsafe_allow_html=True,
-            )
-
         st.markdown("### Connection Test")
         if st.button("Test LLM Connection", use_container_width=True):
             _run_connection_test(provider)

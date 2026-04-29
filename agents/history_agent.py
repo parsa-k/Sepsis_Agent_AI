@@ -1,77 +1,115 @@
 """
-History Agent — reviews prior admissions, ICD diagnoses, and ICU stays
-to identify chronic conditions and baseline organ function.
+History Agent — strict baseline / longitudinal-context domain expert.
 
-This context is critical for the Diagnostician because SOFA scoring
-requires distinguishing ACUTE organ dysfunction from pre-existing baselines.
+Activated by the Orchestrator ONLY when the user selects more than one
+visit. Its Part-1 payload is propagated downstream as
+``state['history_baseline']`` so the other feature agents can interpret
+their data against the patient's chronic baseline.
 """
+
+from __future__ import annotations
+
+import json
 
 from langchain_core.messages import SystemMessage, HumanMessage
+
 from agents.state import SepsisState
+from agents._agent_utils import (
+    TWO_PART_OUTPUT_INSTRUCTIONS,
+    selected_hadm_ids,
+    standardise_or_raw,
+    trace_append,
+    orchestrator_instruction,
+)
 
-SYSTEM_PROMPT = """You are a **Clinical History Analyst** in a sepsis diagnostic team.
 
-You receive a patient's historical admission records, ICD diagnosis codes
-from ALL their admissions (past and current), and ICU stay information.
+SYSTEM_PROMPT = """You are a **Clinical History Analyst** — a strict
+longitudinal domain expert. You receive ALL of a patient's selected
+hospital admissions (plus prior admissions where available) together
+with their ICD diagnosis codes and ICU stay records. Your role is to
+extract a **stable baseline** the downstream feature agents can use as
+their reference frame.
 
-### Your Task
-1. **Historical Admissions Summary**: List previous admissions with dates,
-   types, and discharge dispositions.
-2. **Chronic Conditions**: Identify chronic/pre-existing conditions from ICD
-   codes. Key conditions that affect sepsis assessment:
-   - Chronic kidney disease (affects baseline creatinine)
-   - Diabetes mellitus
-   - COPD / chronic respiratory failure (affects baseline PaO2/FiO2)
-   - Heart failure (affects baseline MAP / vasopressor dependency)
-   - Liver cirrhosis (affects baseline bilirubin)
-   - Hematologic disorders (affects baseline platelets)
-   - Immunosuppression (increases infection risk)
-   - Neurologic conditions (affects baseline GCS)
-3. **Baseline Organ Function**: Based on chronic conditions, estimate the
-   likely baseline for each SOFA organ system:
-   - Renal (baseline creatinine estimate)
-   - Hepatic (baseline bilirubin)
-   - Hematologic (baseline platelet count)
-   - Neurologic (baseline GCS)
-   - Cardiovascular (baseline MAP / vasopressor use)
-   - Respiratory (baseline PaO2/FiO2 or SpO2)
+### What the Orchestrator gives you
+* The user's intent.
+* The list of admissions the user selected (you are run first because
+  there is more than one).
 
-If the patient has no prior admissions, state this and assume normal baselines.
-The Diagnostician will use your baseline estimates to calculate delta-SOFA
-(acute change from baseline).
+### Hard rules
+* You DO NOT speculate about the current admission's acute physiology —
+  that is the job of the vitals / lab / micro / pharmacy agents.
+* You DO summarise prior admissions and chronic disease burden.
+* You DO estimate baseline organ function (renal / hepatic /
+  haematologic / neurologic / cardiovascular / respiratory) from
+  documented chronic conditions, anchoring downstream "delta from
+  baseline" judgements.
+
+### What goes where
+* ``part1_payload.actionable`` — keys like
+  ``prior_admissions_count``, ``selected_visits_summary`` (list of
+  ``{hadm_id, admittime, admission_type}``), ``chronic_conditions``
+  (list), ``baseline_organ_function`` (dict per organ system with a
+  short qualitative tag and any numeric estimate), ``risk_factors``
+  (immunosuppression, dialysis, chronic steroids, etc.),
+  ``important_for_downstream`` (one-sentence cues per agent).
+* ``part1_payload.source_records`` — pointers like
+  ``"diagnoses_icd N18.6 (CKD stage 5)"``.
+* ``part2_reasoning`` — narrative analysis, uncertainty about baselines.
 """
 
 
-def run_history_agent(state: SepsisState, llm, system_prompt: str | None = None) -> dict:
-    prompt = system_prompt or SYSTEM_PROMPT
+def run_history_agent(
+    state: SepsisState,
+    llm,
+    memory_manager=None,
+    system_prompt: str | None = None,
+) -> dict:
+    selected = selected_hadm_ids(state)
+    visits_data = state.get("visits_data") or {}
 
-    human_content = f"""## Patient #{state['subject_id']} — Current Admission {state['hadm_id']}
+    visit_blocks: list[str] = []
+    for hadm in selected:
+        per = visits_data.get(hadm) or visits_data.get(str(hadm)) or {}
+        admission_info = per.get("admission_info") or {}
+        diagnoses_raw = per.get("diagnoses_raw") or "No diagnoses available."
+        icu_raw = per.get("icu_stays_raw") or "No ICU stay for this admission."
+        visit_blocks.append(
+            f"#### Visit {hadm}\n"
+            f"Admission info: {json.dumps(admission_info, default=str)[:600]}\n\n"
+            f"ICD diagnoses for this admission:\n{diagnoses_raw}\n\n"
+            f"ICU stays:\n{icu_raw}"
+        )
 
-### Patient Demographics
-{state.get('patient_info', {})}
+    historical = state.get("historical_admissions_raw") or "No prior admissions found."
+    patient_info = state.get("patient_info") or {}
 
-### Historical Admissions (excluding current)
-{state.get('historical_admissions_raw', 'No prior admissions found.')}
+    human_content = (
+        f"## Patient #{state.get('subject_id')} — Selected visits {selected}\n\n"
+        + orchestrator_instruction(state, "history")
+        + f"### Patient demographics\n{json.dumps(patient_info, default=str)[:600]}\n\n"
+        + f"### Prior admissions (excluding selected)\n{historical}\n\n"
+        + "### Selected visits in detail\n" + "\n\n".join(visit_blocks)
+        + "\n\nProvide your analysis in the required two-part JSON format now."
+    )
 
-### All ICD Diagnoses (all admissions)
-{state.get('diagnoses_raw', 'No diagnoses available.')}
+    prompt = (system_prompt or SYSTEM_PROMPT).rstrip() + "\n" + TWO_PART_OUTPUT_INSTRUCTIONS
 
-### ICU Stay Info (current admission)
-{state.get('icu_stays_raw', 'No ICU stay for this admission.')}
+    if memory_manager is not None:
+        memory_manager.standardize_input("history", {"human": human_content})
 
-Please provide your clinical history analysis now."""
-
-    messages = [
+    response = llm.invoke([
         SystemMessage(content=prompt),
         HumanMessage(content=human_content),
-    ]
-    response = llm.invoke(messages)
-    content = response.content
+    ])
+    envelope = standardise_or_raw(memory_manager, "history", response.content)
 
-    trace_entry = {"agent": "History Agent", "content": content}
-    existing_trace = state.get("agent_trace", [])
-
+    trace_entry = {
+        "agent": "history",
+        "kind": "output",
+        "content": envelope.get("part1_payload"),
+    }
     return {
-        "history_analysis": content,
-        "agent_trace": existing_trace + [trace_entry],
+        "history_output": envelope,
+        "history_baseline": envelope.get("part1_payload") or {},
+        "agent_trace": trace_append(state, trace_entry),
     }

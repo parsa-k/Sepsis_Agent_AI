@@ -7,7 +7,7 @@ import db
 
 
 def render():
-    st.markdown("# 📊 MIMIC-IV Dataset Dashboard")
+    st.markdown("# MIMIC-IV Dataset Dashboard")
     st.markdown(
         '<div class="section-divider"></div>',
         unsafe_allow_html=True,
@@ -208,7 +208,7 @@ def _render_patient_browser():
             f'Sepsis-ready: <strong>{len(sepsis_subjects):,}</strong> '
             f'patients across <strong>{sepsis_stays_count:,}</strong> ICU '
             f'stays have complete data (cultures + antibiotics + PaO2 + '
-            f'Platelets + Bilirubin + Creatinine + MAP + GCS)</div>',
+            f'Platelets + Bilirubin + Creatinine + MAP + GCS)(18 <= age <= 90)</div>',
             unsafe_allow_html=True,
         )
 
@@ -290,6 +290,46 @@ def _render_patient_detail(subject_id: int):
                 missing.append(label)
 
     _render_completeness_summary(available, missing)
+
+    if not detail["vitals"].empty:
+        render_vitals_chart(detail["vitals"])
+
+
+def render_vitals_chart(df):
+    if df is None or df.empty:
+        return
+    
+    st.markdown(
+        '<div class="section-divider"></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("### Vital Signs Visualization")
+    labels = df["label"].unique().tolist()
+    if not labels:
+        st.info("No vital sign labels found to plot.")
+        return
+    
+    # Use a unique key based on the first few labels to avoid clashes
+    key_suffix = hash("".join(labels[:3]))
+    selected_vital = st.selectbox("Select Vital Sign to Plot", options=labels, key=f"vital_plot_{key_suffix}")
+    plot_df = df[df["label"] == selected_vital]
+    
+    if not plot_df.empty:
+        fig = px.line(
+            plot_df, x="charttime", y="valuenum",
+            title=f"{selected_vital} Over Time",
+            markers=True
+        )
+        fig.update_layout(
+            font_family="Inter",
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            xaxis_title="Time",
+            yaxis_title=selected_vital,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("No numeric data to plot for the selected vital sign.")
 
 
 def _render_completeness_summary(

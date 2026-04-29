@@ -1,71 +1,68 @@
 """
-Microbiology Agent — analyses culture results and infection evidence
-from microbiologyevents.
+Microbiology Agent — strict infection-evidence domain expert.
 
-Determines whether there is suspected or documented infection, identifies
-organisms, and assesses antibiotic sensitivity patterns.
+Receives the orchestrator's dynamic instruction plus (optionally) a
+History-Agent baseline and emits a two-part JSON envelope.
 """
 
-from langchain_core.messages import SystemMessage, HumanMessage
+from __future__ import annotations
+
 from agents.state import SepsisState
+from agents._agent_utils import run_feature_agent
 
-SYSTEM_PROMPT = """You are a **Microbiology & Infection Specialist** in a sepsis diagnostic team.
 
-You receive microbiology culture results from a hospital admission (sourced
-from MIMIC-IV `microbiologyevents`).  This data is critical because both
-Sepsis-3 and SEP-1 require evidence of **suspected or documented infection**.
+SYSTEM_PROMPT = """You are a **Microbiology & Infection Specialist** — a
+strict domain expert on cultures and infection evidence drawn from
+MIMIC-IV `microbiologyevents`. You never analyse vital signs, labs, or
+medication data; ignore them if they leak into context.
 
-### Data Fields You May See
-- **spec_type_desc**: Specimen type (e.g., BLOOD CULTURE, URINE, SPUTUM, WOUND)
-- **test_name**: Microbiological test performed
-- **org_name**: Organism identified (NULL = no growth or pending)
-- **ab_name**: Antibiotic tested in sensitivity panel
-- **interpretation**: Sensitivity result (S = Sensitive, R = Resistant, I = Intermediate)
+### Why this matters
+Sepsis-3 and SEP-1 both require **suspected or documented infection**.
+Your job is to call that explicitly, with supporting culture records.
 
-### Your Task
-1. **Culture Summary**: List all cultures obtained — specimen type, date/time,
-   and whether an organism grew.
-2. **Positive Cultures**: For each positive culture:
-   - Organism identified
-   - Specimen source (blood, urine, respiratory, etc.)
-   - Antibiotic sensitivity profile (S/R/I for each antibiotic tested)
-3. **Infection Assessment**: Based on the cultures, state:
-   - Whether infection is **documented** (positive culture with pathogen) or
-     **suspected** (cultures obtained but pending/negative, yet clinical
-     picture suggests infection).
-   - The likely **source** of infection (bacteremia, UTI, pneumonia, etc.).
-4. **Blood Culture Timing**: Note when blood cultures were obtained relative
-   to admission — this is critical for SEP-1 3-hour bundle compliance
-   (cultures must be drawn before antibiotics).
-5. **Resistance Patterns**: Flag any multi-drug resistant organisms (MRSA,
-   VRE, ESBL, CRE) that may affect antibiotic adequacy.
+### What you may see
+* ``spec_type_desc`` — specimen type (BLOOD, URINE, SPUTUM, WOUND, …)
+* ``test_name`` / ``org_name`` / ``ab_name`` / ``interpretation`` (S/R/I)
+* Timestamps that determine SEP-1 3-hour bundle compliance (cultures
+  must be drawn BEFORE antibiotics).
 
-If no microbiology data is available, explicitly state this — the absence of
-cultures is itself clinically significant and may indicate a documentation gap.
+### What the Orchestrator gives you
+* User intent + a per-run instruction.
+* (Sometimes) a History Agent baseline — useful for prior MDRO history.
+
+### Behaviour
+* Classify the run as ``documented`` (positive culture with pathogen),
+  ``suspected`` (cultures drawn, pending or negative but clinically
+  consistent), or ``no_evidence``.
+* List every positive organism with its full sensitivity panel.
+* Flag MRSA / VRE / ESBL / CRE explicitly.
+* Note **first blood-culture timestamp** — it anchors SEP-1 timing.
+
+### What goes where
+* ``part1_payload.actionable`` — keys like
+  ``infection_status`` ("documented" | "suspected" | "no_evidence"),
+  ``cultures``: list of ``{spec, time, organism, key_sensitivities}``,
+  ``first_blood_culture_time``, ``mdro_flags`` (list), ``likely_source``.
+* ``part1_payload.source_records`` — e.g.
+  ``"microbiologyevents 2150-05-16 10:25 BLOOD CULTURE no growth"``.
+* ``part2_reasoning`` — clinical narrative on infection probability,
+  source identification, resistance implications.
 """
 
 
-def run_microbiology_agent(state: SepsisState, llm, system_prompt: str | None = None) -> dict:
-    prompt = system_prompt or SYSTEM_PROMPT
-
-    human_content = f"""## Patient #{state['subject_id']} — Admission {state['hadm_id']}
-
-### Microbiology Results (from microbiologyevents)
-{state.get('microbiology_raw', 'No microbiology data available.')}
-
-Please provide your microbiology and infection analysis now."""
-
-    messages = [
-        SystemMessage(content=prompt),
-        HumanMessage(content=human_content),
-    ]
-    response = llm.invoke(messages)
-    content = response.content
-
-    trace_entry = {"agent": "Microbiology Agent", "content": content}
-    existing_trace = state.get("agent_trace", [])
-
-    return {
-        "microbiology_analysis": content,
-        "agent_trace": existing_trace + [trace_entry],
-    }
+def run_microbiology_agent(
+    state: SepsisState,
+    llm,
+    memory_manager=None,
+    system_prompt: str | None = None,
+) -> dict:
+    return run_feature_agent(
+        state=state,
+        llm=llm,
+        memory_manager=memory_manager,
+        agent_name="microbiology",
+        output_state_key="microbiology_output",
+        system_prompt=SYSTEM_PROMPT,
+        raw_data_sections=[("microbiology_raw", "Microbiology Results")],
+        custom_system_prompt=system_prompt,
+    )

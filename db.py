@@ -141,6 +141,8 @@ def get_sepsis_ready_stays(conn: duckdb.DuckDBPyConnection) -> pd.DataFrame:
         INNER JOIN has_vitals ON icu.stay_id = has_vitals.stay_id
         INNER JOIN has_cultures ON icu.hadm_id = has_cultures.hadm_id
         INNER JOIN has_antibiotics ON icu.hadm_id = has_antibiotics.hadm_id
+        INNER JOIN read_csv_auto('{PATHS['patients']}') p ON icu.subject_id = p.subject_id
+        WHERE p.anchor_age >= 18 AND p.anchor_age <= 90
     """).fetchdf()
 
 

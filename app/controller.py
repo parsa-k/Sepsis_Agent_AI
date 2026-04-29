@@ -8,8 +8,7 @@ from agents.lab_agent import SYSTEM_PROMPT as DEFAULT_LAB
 from agents.microbiology_agent import SYSTEM_PROMPT as DEFAULT_MICROBIOLOGY
 from agents.pharmacy_agent import SYSTEM_PROMPT as DEFAULT_PHARMACY
 from agents.history_agent import SYSTEM_PROMPT as DEFAULT_HISTORY
-from agents.diagnostician_agent import SYSTEM_PROMPT as DEFAULT_DIAGNOSTICIAN
-from agents.compliance_agent import SYSTEM_PROMPT as DEFAULT_COMPLIANCE
+from agents.diagnoses_agent import SYSTEM_PROMPT as DEFAULT_DIAGNOSES
 
 
 AGENT_DEFS = [
@@ -18,18 +17,27 @@ AGENT_DEFS = [
         "label": "Orchestrator",
         "icon": "🧠",
         "description": (
-            "Central brain — plans analysis, coordinates sub-agents, "
-            "and synthesises the final report."
+            "Dynamic planner — reads user intent + data flags and decides "
+            "which feature agents to activate (and whether History runs first)."
         ),
         "default": DEFAULT_ORCHESTRATOR,
+    },
+    {
+        "key": "prompt_history",
+        "label": "History Agent",
+        "icon": "📋",
+        "description": (
+            "Multi-visit baseline extractor. Activated by the Orchestrator "
+            "ONLY when the user selects more than one visit."
+        ),
+        "default": DEFAULT_HISTORY,
     },
     {
         "key": "prompt_vitals",
         "label": "Vitals Agent",
         "icon": "💓",
         "description": (
-            "Analyses charted vital signs: HR, BP/MAP, Temp, RR, "
-            "SpO2, GCS from chartevents."
+            "Strict vital-signs domain expert: HR, BP/MAP, Temp, RR, SpO2, GCS."
         ),
         "default": DEFAULT_VITALS,
     },
@@ -38,8 +46,8 @@ AGENT_DEFS = [
         "label": "Lab Agent",
         "icon": "🔬",
         "description": (
-            "Analyses lab results: WBC, Lactate, Creatinine, "
-            "Bilirubin, Platelets, PaO2, Blood Gas."
+            "Strict labs domain expert: WBC, Lactate, Creatinine, Bilirubin, "
+            "Platelets, blood-gas."
         ),
         "default": DEFAULT_LAB,
     },
@@ -48,8 +56,8 @@ AGENT_DEFS = [
         "label": "Microbiology Agent",
         "icon": "🦠",
         "description": (
-            "Analyses cultures, organisms, sensitivities — "
-            "determines infection evidence."
+            "Strict infection-evidence domain expert: cultures, organisms, "
+            "sensitivities, MDRO flags."
         ),
         "default": DEFAULT_MICROBIOLOGY,
     },
@@ -58,52 +66,32 @@ AGENT_DEFS = [
         "label": "Pharmacy Agent",
         "icon": "💊",
         "description": (
-            "Analyses antibiotics, vasopressors, IV fluids, "
-            "and urine output."
+            "Strict pharmacy/fluids domain expert: antibiotics, vasopressors, "
+            "crystalloid totals, urine output."
         ),
         "default": DEFAULT_PHARMACY,
     },
     {
-        "key": "prompt_history",
-        "label": "History Agent",
-        "icon": "📋",
-        "description": (
-            "Reviews prior admissions and ICD diagnoses to identify "
-            "chronic conditions and baseline organ function."
-        ),
-        "default": DEFAULT_HISTORY,
-    },
-    {
-        "key": "prompt_diagnostician",
-        "label": "Diagnostician Agent",
+        "key": "prompt_diagnoses",
+        "label": "Diagnoses Agent (master)",
         "icon": "🩻",
         "description": (
-            "Applies Sepsis-3 criteria — calculates SOFA score and "
-            "determines if organ dysfunction is acute."
+            "Master reasoning agent. Consumes only Part 1 payloads from the "
+            "active feature agents and emits the final summary, Patient State "
+            "Score (1–5), Sepsis-3 verdict, and SEP-1 compliance verdict."
         ),
-        "default": DEFAULT_DIAGNOSTICIAN,
-    },
-    {
-        "key": "prompt_compliance",
-        "label": "Compliance Agent",
-        "icon": "📑",
-        "description": (
-            "Checks CMS SEP-1 bundle compliance — SIRS screening, "
-            "3-hour and 6-hour bundle timing."
-        ),
-        "default": DEFAULT_COMPLIANCE,
+        "default": DEFAULT_DIAGNOSES,
     },
 ]
 
 _PROMPT_KEYS = [
     ("prompt_orchestrator", "orchestrator"),
+    ("prompt_history", "history"),
     ("prompt_vitals", "vitals"),
     ("prompt_lab", "lab"),
     ("prompt_microbiology", "microbiology"),
     ("prompt_pharmacy", "pharmacy"),
-    ("prompt_history", "history"),
-    ("prompt_diagnostician", "diagnostician"),
-    ("prompt_compliance", "compliance"),
+    ("prompt_diagnoses", "diagnoses"),
 ]
 
 
@@ -117,7 +105,7 @@ def get_custom_prompts() -> dict:
 
 
 def render():
-    st.markdown("# 🎛️ Agent Controller")
+    st.markdown("# Agent Controller")
     st.markdown(
         '<div class="section-divider"></div>',
         unsafe_allow_html=True,
@@ -141,10 +129,38 @@ def render():
 
 # ── Private helpers ──────────────────────────────────────────────────────────
 
+import json
+import os
+
+PROMPTS_FILE = "custom_prompts.json"
+
+def _load_saved_prompts():
+    if os.path.exists(PROMPTS_FILE):
+        try:
+            with open(PROMPTS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def _save_saved_prompts(key, value):
+    prompts = _load_saved_prompts()
+    prompts[key] = value
+    with open(PROMPTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(prompts, f, indent=2)
+
+def _remove_saved_prompt(key):
+    prompts = _load_saved_prompts()
+    if key in prompts:
+        del prompts[key]
+        with open(PROMPTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(prompts, f, indent=2)
+
 def _init_defaults():
+    saved = _load_saved_prompts()
     for agent in AGENT_DEFS:
         if agent["key"] not in st.session_state:
-            st.session_state[agent["key"]] = agent["default"]
+            st.session_state[agent["key"]] = saved.get(agent["key"], agent["default"])
 
 
 def _render_prompt_editors():
@@ -176,16 +192,27 @@ def _render_prompt_editors():
             )
             st.session_state[agent["key"]] = new_val
 
-            btn_cols = st.columns([1, 1, 4])
+            btn_cols = st.columns([1, 1, 1, 3])
             with btn_cols[0]:
+                if st.button(
+                    "Save Prompt",
+                    key=f'_save_{agent["key"]}',
+                    use_container_width=True,
+                    type="primary"
+                ):
+                    _save_saved_prompts(agent["key"], st.session_state[agent["key"]])
+                    st.success("Saved!")
+                    
+            with btn_cols[1]:
                 if st.button(
                     "Reset to Default",
                     key=f'_reset_{agent["key"]}',
                     use_container_width=True,
                 ):
                     st.session_state[agent["key"]] = agent["default"]
+                    _remove_saved_prompt(agent["key"])
                     st.rerun()
-            with btn_cols[1]:
+            with btn_cols[2]:
                 st.markdown(
                     f"<small style='color:#888;padding-top:0.5rem;"
                     f"display:block;'>{len(new_val):,} chars</small>",
@@ -232,4 +259,8 @@ def _render_reset_all_button():
         ):
             for agent in AGENT_DEFS:
                 st.session_state[agent["key"]] = agent["default"]
+            
+            import os
+            if os.path.exists(PROMPTS_FILE):
+                os.remove(PROMPTS_FILE)
             st.rerun()
